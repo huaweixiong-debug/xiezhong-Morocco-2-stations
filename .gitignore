@@ -1,0 +1,51 @@
+# Workspace-local agent files
+.superpowers/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+
+# Python build and packaging output
+python_app/build/
+python_app/dist/
+python_app/final_build/
+python_app/final_dist/
+python_app/package_build*/
+python_app/package_dist*/
+
+# Generated/non-canonical visual evidence
+python_app/phase1_screenshots_*/
+python_app/review_package/history_non_acceptance/
+
+# Runtime data, logs and local configuration
+*.log
+*.db
+*.sqlite
+*.sqlite3
+Setup.ini
+.env
+.env.*
+!.env.example
+
+# LabVIEW user-specific settings and generated output
+*.lvlps
+*.aliases.local
+*.lvm
+
+# Windows/editor files
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.tmp
+~$*

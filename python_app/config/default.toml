@@ -1,0 +1,5 @@
+mode = "simulate"
+plc_ip = "192.168.2.1"
+plc_poll_ms = 100
+ateq_com_a = "COM6"
+ateq_com_b = "COM7"
