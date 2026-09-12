@@ -1,0 +1,7 @@
+{
+  "status": "NOT_EXECUTED",
+  "tool": "app.replay.compare_report",
+  "tolerance_policy": "caller supplied absolute numeric tolerance",
+  "checks": ["station", "cycle_id", "program", "sequence", "fields", "missing_frames", "extra_frames"],
+  "hardware_evidence": false
+}
