@@ -1,0 +1,16 @@
+mode = "live"
+plc_ip = "192.168.2.1"
+plc_poll_ms = 100
+ateq_com_a = "COM4"
+ateq_com_b = "COM6"
+ateq_slave_a = 255
+# B F620 read-only confirmed on the remote host: COM6 / slave 1.
+ateq_slave_b = 1
+ports_confirmed = false
+scanner_ip = "192.168.2.10"
+scanner_port = 9004
+database = "test"
+database_host = "127.0.0.1"
+database_port = 3306
+credential_path = "C:\\ProgramData\\LeakTest2Channels\\db.json"
+data_dir = "D:\\data"

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# IDE
+.idea/
+
+# 运行时产物（不入库）
+*.log
+b_test_trigger.txt
+calibration_state.json
+
+# 本机备份目录（变更前时间戳备份）
+backup_*/
+
+# 构建/安装产物
+build/
+dist/
+final_build/
+final_dist/
+installer/
+installers/
+package_build_*/
+package_dist_*/
+package_dist_final*/
+review_package/
+_setup/
+phase1_screenshots_*/
+*.exe
+*.msi
+*.msm
+
+# 大型二进制截图（保留文档用 md）
+*.png
+calibration_state.*.tmp
