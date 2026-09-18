@@ -3,11 +3,54 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 
 from .models import StationId
+
+
+_SERIAL_PROCESS_LOCK = RLock()
+
+
+@contextmanager
+def _serial_file_lock(serial_path: Path):
+    """Serialize counter read/modify/write across UI processes.
+
+    The live UI can be restarted while the previous process is winding down;
+    an in-process lock alone would still allow both processes to reserve the
+    same number.  An O_EXCL sidecar lock keeps the critical section atomic on
+    the Windows data drive without adding a third-party dependency.
+    """
+    lock_path = Path(f"{serial_path}.lock")
+    deadline = time.monotonic() + 5.0
+    acquired = False
+    with _SERIAL_PROCESS_LOCK:
+        while not acquired:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                acquired = True
+            except FileExistsError:
+                try:
+                    if time.time() - lock_path.stat().st_mtime > 30:
+                        lock_path.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() >= deadline:
+                    raise BarcodeInputError(f"流水号文件锁超时: {serial_path}")
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 class BarcodeError(Exception):
@@ -278,27 +321,42 @@ class BarcodeRuleEngine:
         _atomic_write(payload.print_path_txt, str(payload.template_path))
         _atomic_write(payload.product_txt_path, payload.product_id)
 
-    def advance_serial(self, product: str, station: StationId, when: datetime | None = None) -> str:
+    def advance_serial(self, product: str, station: StationId, when: datetime | None = None,
+                       consumed_serial: str | None = None) -> str:
         """Consume the current serial and store the next one, resetting daily.
 
         现场规则：正常测试件流水号按周期递增（0001..9999），跨日归零。
         计数文件保持原有四位数字格式；日期锚点写在旁边的 ``序列号X日期.txt``。
+
+        ``consumed_serial`` is the frozen serial attached to the cycle being
+        closed.  If another process or a stale payload left the counter behind
+        that value, the next value is based on the larger value instead of
+        writing a duplicate back to disk.
         """
         if not isinstance(station, StationId):
             raise BarcodeInputError(f"工位必须为 StationId: {station!r}")
         rule = self.products.rule_for(product.strip())
         serial_path = Path(rule.serial_files[station])
-        current = int(read_serial(serial_path))
-        today = (when or datetime.now()).strftime("%Y%m%d")
-        day_path = serial_path.with_name(f"{serial_path.stem}日期.txt")
-        last_day = day_path.read_text(encoding="utf-8-sig").strip() if day_path.is_file() else ""
-        if last_day and last_day != today:
-            nxt = 1
-        else:
-            nxt = current + 1 if current < 9999 else 1
-        _atomic_write(day_path, today)
-        _atomic_write(serial_path, f"{nxt:04d}")
-        return f"{nxt:04d}"
+        expected = None
+        if consumed_serial is not None:
+            raw_expected = str(consumed_serial).strip()
+            if not raw_expected.isdigit() or not 0 <= int(raw_expected) <= 9999:
+                raise BarcodeInputError(f"已消费流水号无效: {consumed_serial!r}")
+            expected = int(raw_expected)
+        with _serial_file_lock(serial_path):
+            current = int(read_serial(serial_path))
+            today = (when or datetime.now()).strftime("%Y%m%d")
+            day_path = serial_path.with_name(f"{serial_path.stem}日期.txt")
+            last_day = (day_path.read_text(encoding="utf-8-sig").strip()
+                        if day_path.is_file() else "")
+            if last_day and last_day != today:
+                nxt = 1
+            else:
+                floor = max(current, expected if expected is not None else current)
+                nxt = floor + 1 if floor < 9999 else 1
+            _atomic_write(day_path, today)
+            _atomic_write(serial_path, f"{nxt:04d}")
+            return f"{nxt:04d}"
 
     def current_calibration_serial(self, product: str, station: StationId,
                                    when: datetime | None = None) -> str:
@@ -386,14 +444,32 @@ def _atomic_write(path: Path, value: str) -> None:
 
 
 def route_shared_scan(code: str, expected: dict[StationId, str], busy: set[StationId] | None = None) -> StationId:
-    """Resolve a shared scanner frame by exact comparison with frozen station QR codes."""
+    """Resolve a shared scanner frame by its frozen station QR-code prefix.
+
+    Some scanners append auxiliary fields after the actual label payload.  The
+    printed payload remains the source of truth; a frame is accepted when it
+    equals that payload or starts with it.  This keeps unrelated labels out
+    while allowing the scanner's trailing fields to be ignored.
+    """
     normalized = code.strip()
     if not normalized or normalized != code:
         raise BarcodeInputError("扫码内容为空或包含首尾空白")
-    matches = [station for station, candidate in expected.items() if candidate == normalized]
+    matches = [station for station, candidate in expected.items()
+               if scanner_code_matches(normalized, candidate)]
     if len(matches) != 1:
         raise BarcodeInputError("二维码未匹配任何工位" if not matches else "A/B 二维码相同，无法确定工位")
     station = matches[0]
     if busy and station in busy:
         raise BarcodeInputError(f"工位 {station.value} 正忙，拒绝扫码")
     return station
+
+
+def scanner_code_matches(scanned: str, expected: str) -> bool:
+    """Return whether a scanner frame contains the complete expected QR code.
+
+    The expected value is generated by the configured barcode rule and is
+    never truncated.  Only data appended *after* that value is ignored.
+    """
+    actual = str(scanned).strip()
+    target = str(expected).strip()
+    return bool(target) and actual.startswith(target)

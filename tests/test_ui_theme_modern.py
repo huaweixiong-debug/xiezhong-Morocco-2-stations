@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import re
 
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QGroupBox, QLineEdit, QTableWidget
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QGroupBox, QLineEdit, QTableWidget, QFrame, QWidget
 
 from app.models import StationId
 from app.ui import MainWindow
@@ -63,6 +63,93 @@ def test_explicit_manual_targets_have_readback_and_a_b_isolation():
     assert window.plc.read_bit(3, 4)
     assert any(token in window.findChild(QLabel, "manual_readback_clamp_A").text() for token in ("ON", "开", "MARCHE"))
     window.close(); app.processEvents()
+
+
+def test_manual_page_has_win11_station_cards_and_localized_header():
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.resize(1366, 768)
+    window.show()
+    window.tabs.setCurrentIndex(3)
+    app.processEvents()
+
+    page = next((candidate for candidate in window.findChildren(QWidget) if candidate.property("manualPage")), None)
+    title = window.findChild(QLabel, "manualPageTitle")
+    hint = window.findChild(QLabel, "manualPageHint")
+    extensions = window.findChild(QPushButton, "manual_extension_toggle")
+    assert page is not None and title is not None and hint is not None and extensions is not None
+    assert title.text() == "手动控制"
+    assert "管理员授权" in hint.text() and "PLC" in hint.text()
+    assert extensions.parentWidget() is page
+
+    cards = [window.findChild(QGroupBox, f"manualGroup_{station}") for station in ("A", "B")]
+    assert all(card is not None for card in cards)
+    assert abs(cards[0].width() - cards[1].width()) <= 2
+    assert extensions.geometry().bottom() < cards[0].geometry().top()
+    for station, card in zip(("A", "B"), cards):
+        rows = [row for row in card.findChildren(QFrame) if row.property("manualControlRow")]
+        assert len(rows) == 6
+        assert all(row.height() >= 68 for row in rows)
+        for signal in ("clamp", "transfer", "block", "stamp", "door_disable", "manual"):
+            row = window.findChild(QFrame, f"manualRow_{signal}_{station}")
+            readback = window.findChild(QLabel, f"manual_readback_{signal}_{station}")
+            assert row is not None and readback is not None
+            assert readback.property("manualReadback") is True
+
+    window.language_selector.setCurrentText("English")
+    app.processEvents()
+    assert title.text() == "Manual Controls"
+    assert "Admin authorization required" in hint.text()
+    window.language_selector.setCurrentText("Français")
+    app.processEvents()
+    assert title.text() == "Commandes manuelles"
+    assert "Autorisation requise" in hint.text()
+    window.close()
+    app.processEvents()
+
+
+def test_main_setup_and_query_pages_share_win11_surfaces():
+    app, window = _window()
+    window.resize(1366, 768)
+    window.tabs.setCurrentIndex(1)
+    app.processEvents()
+    setup_gate = window.findChild(QFrame, "setupGateBar")
+    assert setup_gate is not None
+    assert window.findChild(QGroupBox, "modelPanel") is not None
+    assert window.findChild(QGroupBox, "personnelPanel") is not None
+    assert window.findChild(QFrame, "settingsCard") is not None
+    assert window.findChild(QPushButton, "setup_login").property("primary") is True
+    assert window.setup_table.columnWidth(6) == window.setup_table.columnWidth(7) == 240
+    ateq_label = window.findChild(QLabel, "ateqLabelA")
+    ateq_choice = window.ateq_a
+    assert ateq_label is not None
+    choice_gap = ateq_choice.x() - ateq_label.x() - ateq_label.fontMetrics().horizontalAdvance(ateq_label.text())
+    assert 0 <= choice_gap <= 24
+
+    window.tabs.setCurrentIndex(2)
+    app.processEvents()
+    query_page = window.tabs.widget(2)
+    title = query_page.findChild(QLabel, "pageTitle")
+    hint = query_page.findChild(QLabel, "pageSubtitle")
+    assert title is not None and hint is not None
+    assert title.text() == "查询记录"
+    assert "两工位独立查询" in hint.text()
+    for station in ("A", "B"):
+        assert window.findChild(QGroupBox, f"queryFilters_{station}").property("queryFilterCard") is True
+        assert window.findChild(QPushButton, f"query_search_{station}").property("primary") is True
+        assert window.findChild(QPushButton, f"query_download_{station}") is not None
+        assert window.findChild(QTableWidget, f"query_table_{station}") is not None
+
+    window.language_selector.setCurrentText("English")
+    app.processEvents()
+    assert title.text() == "Test Records"
+    assert "Search station records" in hint.text()
+    window.language_selector.setCurrentText("Français")
+    app.processEvents()
+    assert title.text() == "Historique des tests"
+    assert "Rechercher par poste" in hint.text()
+    window.close()
+    app.processEvents()
 
 
 def test_language_catalog_is_selected_only_and_preserves_manual_data():

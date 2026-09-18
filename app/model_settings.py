@@ -37,8 +37,8 @@ class ModelConfig:
     date_scheme: str = DATE_SCHEME_PRESETS[0]
     ateq_program: str = "1"
     template_family: str = ""
-    station_code_a: str = "8"
-    station_code_b: str = "9"
+    station_code_a: str = "5"
+    station_code_b: str = "6"
     serial_path_a: str = r"D:\data\序列号A.txt"
     serial_path_b: str = r"D:\data\序列号B.txt"
     # Keep the logical family for old configurations, while retaining the
@@ -112,8 +112,8 @@ class ModelConfig:
             date_scheme=get("日期", DATE_SCHEME_PRESETS[0]),
             ateq_program=get("ATEQ程序号", get("ATEQ程序号A", "1")),
             template_family=get("打印模板", get("打印路径A", fr"D:\data\{part_no}-A.btw")),
-            station_code_a=get("工位号A", "8"),
-            station_code_b=get("工位号B", "9"),
+            station_code_a=get("工位号A", "5"),
+            station_code_b=get("工位号B", "6"),
             serial_path_a=get("流水号A", r"D:\data\序列号A.txt"),
             serial_path_b=get("流水号B", r"D:\data\序列号B.txt"),
             template_path_a=get("打印路径A"),
@@ -197,7 +197,7 @@ class ModelSettingsService:
 class GlobalSettingsService:
     """与型号无关的全局参数（工位号 A/B、校准周期），存 D:\data\全局设置.ini。"""
 
-    DEFAULTS = {"工位号A": "8", "工位号B": "9", "校准周期": "02:00:00"}
+    DEFAULTS = {"工位号A": "5", "工位号B": "6", "校准周期": "02:00:00"}
 
     def __init__(self, security: SecurityContext, path: Path = Path(r"D:\data\全局设置.ini")) -> None:
         self.security = security

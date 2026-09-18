@@ -141,6 +141,18 @@ class UiTextCatalog:
         "看门狗 / Watchdog": {"中文": "看门狗", "English": "Watchdog", "Français": "Chien de garde"},
         "标签重打 / Reprint": {"中文": "标签重打", "English": "Reprint label", "Français": "Réimprimer"},
         "显示扩展 / Extensions": {"中文": "显示扩展", "English": "Show extensions", "Français": "Afficher les extensions"},
+        "手动控制 / Manual Controls": {"中文": "手动控制", "English": "Manual Controls", "Français": "Commandes manuelles"},
+        "手动输出需管理员授权 · PLC 状态实时回读 / Admin authorization required · live PLC state": {
+            "中文": "手动输出需管理员授权 · PLC 状态实时回读",
+            "English": "Admin authorization required · live PLC state",
+            "Français": "Autorisation requise · état PLC en direct",
+        },
+        "查询记录 / Test Records": {"中文": "查询记录", "English": "Test Records", "Français": "Historique des tests"},
+        "两工位独立查询 · 支持时间、条码和结果 / Search station records by time, code, and result": {
+            "中文": "两工位独立查询 · 支持时间、条码和结果",
+            "English": "Search station records by time, code, and result",
+            "Français": "Rechercher par poste, date, code et résultat",
+        },
         "管理员恢复 / Recovery": {"中文": "管理员恢复", "English": "Admin recovery", "Français": "Récupération admin"},
         "处理原因 / reason": {"中文": "处理原因", "English": "Reason", "Français": "Motif"},
         "无恢复操作": {"中文": "无恢复操作", "English": "No recovery action", "Français": "Aucune action de récupération"},
@@ -151,6 +163,9 @@ class UiTextCatalog:
         "SIMULATE readback / 快捷诊断": {"中文": "SIMULATE 回读", "English": "SIMULATE readback", "Français": "Retour SIMULATE"},
         "已认证": {"中文": "已认证", "English": "Authenticated", "Français": "Authentifié"},
         "登录失败": {"中文": "登录失败", "English": "Sign-in failed", "Français": "Échec de connexion"},
+        "StepCode": {"中文": "步骤码", "English": "StepCode", "Français": "Code étape"},
+        "SIM": {"中文": "模拟", "English": "SIM", "Français": "SIM"},
+        "读取中": {"中文": "读取中", "English": "Reading", "Français": "Lecture"},
     }
 
     @classmethod
@@ -231,7 +246,17 @@ def stylesheet() -> str:
     QTabBar::tab:selected {{ color: {p.accent}; border-bottom: 2px solid {p.accent}; font-weight: 600; }}
     QTabBar::tab:hover {{ color: {p.accent_hover}; background: {p.accent_soft}; }}
     QFrame#stationCard_A, QFrame#stationCard_B {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; }}
-    QFrame#settingsCard {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; }}
+    QFrame#stationCard_A:hover, QFrame#stationCard_B:hover {{ border-color: {p.border_strong}; }}
+    QFrame#settingsCard {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {m.card_radius + 2}px; }}
+    QFrame#settingsCard:hover {{ border-color: {p.border_strong}; }}
+    QFrame#setupGateBar {{ background: {p.surface_alt}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; }}
+    QLabel#setup_gate_title {{ font-size: {m.operation_text}px; font-weight: 600; }}
+    QLabel#setupGateStatus {{ padding: 4px 10px; border-radius: 10px; background: {p.surface}; }}
+    QGroupBox#manualGroup_A, QGroupBox#manualGroup_B {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {m.card_radius + 2}px; margin-top: 11px; padding-top: 14px; }}
+    QGroupBox#manualGroup_A:hover, QGroupBox#manualGroup_B:hover {{ border-color: {p.border_strong}; }}
+    QGroupBox#modelPanel, QGroupBox#personnelPanel {{ background: {p.surface}; border-color: {p.border}; border-radius: {m.card_radius + 2}px; }}
+    QGroupBox#queryFilters_A, QGroupBox#queryFilters_B {{ background: {p.surface}; border-color: {p.border}; border-radius: {m.card_radius + 2}px; }}
+    QGroupBox#queryFilters_A:hover, QGroupBox#queryFilters_B:hover {{ border-color: {p.border_strong}; }}
     QGroupBox {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; margin-top: 10px; padding-top: 14px; font-size: {m.operation_text}px; font-weight: 600; }}
     QGroupBox#bottomIndicators_A, QGroupBox#bottomIndicators_B {{ margin-top: 0px; padding-top: 0px; }}
     QFrame[calibrationTile="true"] {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; }}
@@ -242,26 +267,36 @@ def stylesheet() -> str:
     QFrame[calibrationTile="true"][state="ok"] QLabel,
     QFrame[calibrationTile="true"][state="warn"] QLabel {{ color: white; }}
     QGroupBox::title {{ subcontrol-origin: margin; left: 14px; padding: 0 6px; color: {p.text}; }}
-    QLabel#pageTitle {{ font-size: {m.page_title}px; font-weight: 600; }}
+    QLabel#pageTitle {{ font-size: 21px; font-weight: 600; }}
+    QLabel#pageSubtitle {{ color: {p.muted}; font-size: {m.label_text}px; }}
+    QLabel#manualPageTitle {{ font-size: 21px; font-weight: 650; color: {p.text}; }}
+    QLabel#manualPageHint {{ color: {p.muted}; font-size: {m.label_text}px; }}
+    QFrame[manualControlRow="true"] {{ background: {p.surface_alt}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; }}
+    QFrame[manualControlRow="true"]:hover {{ background: {p.surface}; border-color: {p.accent}; }}
+    QLabel[manualControlLabel="true"] {{ font-size: {m.operation_text}px; font-weight: 600; }}
+    QLabel[manualReadback="true"] {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: 12px; padding: 5px 8px; font-weight: 600; }}
+    QLabel[manualReadback="true"][state="ok"] {{ color: {p.ok}; background: #edf8f1; border-color: #b8e2c7; }}
+    QLabel[manualReadback="true"][state="info"] {{ color: {p.info}; background: {p.accent_soft}; border-color: #cbdcff; }}
     QLabel#resultBanner {{ min-height: 70px; padding: 14px; background: {p.accent_soft}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; font-size: 24px; }}
     QLabel#stationTitle, QGroupBox[stationTitle="true"] {{ font-size: {m.page_title}px; font-weight: 600; }}
     QLabel#statusOk, QLabel[state="ok"] {{ color: {p.ok}; }}
     QLabel#statusWarn, QLabel[state="warn"] {{ color: {p.warn}; }}
     QLabel#statusNg, QLabel[state="ng"] {{ color: {p.ng}; }}
     QLabel#statusInfo, QLabel[state="info"] {{ color: {p.info}; }}
-    QLineEdit, QComboBox, QSpinBox, QTimeEdit, QDateTimeEdit {{ min-height: {m.input_height}px; border: 1px solid {p.border_strong}; border-radius: {m.control_radius}px; background: {p.surface}; padding: 0 10px; selection-background-color: {p.accent}; }}
+    QLineEdit, QComboBox, QSpinBox, QTimeEdit, QDateTimeEdit {{ min-height: {m.input_height}px; border: 1px solid {p.border_strong}; border-radius: {m.control_radius + 2}px; background: {p.surface}; padding: 0 10px; selection-background-color: {p.accent}; }}
     QSpinBox[compact="true"] {{ min-height: 24px; max-height: 30px; padding: 0 6px; }}
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTimeEdit:focus, QDateTimeEdit:focus {{ border: 2px solid {p.accent}; padding: 0 9px; }}
-    QPushButton {{ min-height: {m.primary_button_height}px; border: 1px solid {p.border_strong}; border-radius: {m.control_radius}px; background: {p.surface}; padding: 0 14px; font-size: {m.operation_text}px; }}
+    QPushButton {{ min-height: {m.primary_button_height}px; border: 1px solid {p.border_strong}; border-radius: {m.control_radius + 2}px; background: {p.surface}; padding: 0 14px; font-size: {m.operation_text}px; }}
     QPushButton[calibrationStart="true"] {{ padding: 0 4px; }}
     QPushButton[compact="true"] {{ min-height: 24px; max-height: 32px; padding: 0 10px; font-size: {m.label_text}px; }}
+    QPushButton[manualToggle="true"] {{ color: {p.accent}; border-color: #cbdcff; font-weight: 600; }}
     QPushButton:hover {{ border-color: {p.accent}; background: {p.accent_soft}; }}
     QPushButton:pressed, QPushButton:checked {{ background: {p.accent}; color: white; border-color: {p.accent}; }}
     QPushButton:disabled {{ color: {p.muted}; background: {p.disabled}; border-color: {p.border}; }}
     QPushButton[primary="true"] {{ background: {p.accent}; color: white; border-color: {p.accent}; font-weight: 600; }}
     QPushButton[primary="true"]:disabled {{ color: {p.muted}; background: {p.disabled}; border-color: {p.border}; font-weight: 400; }}
     QPushButton[destructive="true"] {{ color: {p.ng}; }}
-    QTableWidget {{ background: {p.surface}; alternate-background-color: {p.row_alt}; border: 1px solid {p.border}; border-radius: {m.control_radius}px; gridline-color: {p.border}; font-size: {m.label_text}px; }}
+    QTableWidget {{ background: {p.surface}; alternate-background-color: {p.row_alt}; border: 1px solid {p.border}; border-radius: {m.control_radius + 2}px; gridline-color: #e8edf4; font-size: {m.label_text}px; }}
     QTableWidget::item {{ padding: 0 8px; }}
     QHeaderView::section {{ background: {p.surface_alt}; color: {p.muted}; border: 0; border-bottom: 1px solid {p.border}; padding: 0 8px; font-size: {m.label_text}px; font-weight: 600; }}
     QScrollBar:vertical {{ width: 10px; background: transparent; }}

@@ -1,0 +1,10 @@
+{
+  "mode": "live",
+  "plc": { "host": "192.168.2.1", "rack": 0, "slot": 1, "scanAckBits": { "A": "M0.1", "B": "M0.0" } },
+  "ateq": {
+    "A": { "port": "COM4", "slaveId": 255, "baudRate": 9600, "parity": "even", "dataBits": 8, "stopBits": 1 },
+    "B": { "port": "COM6", "slaveId": 1, "baudRate": 9600, "parity": "even", "dataBits": 8, "stopBits": 1 }
+  },
+  "scanner": { "host": "192.168.2.10", "port": 9004, "terminator": "\\r" },
+  "printer": { "executable": "REQUIRED", "templateRoot": "REQUIRED", "printerName": "REQUIRED" }
+}

@@ -35,6 +35,7 @@ class FakePlc:
         self._bits: dict[tuple[int, int], bool] = {}
         self._lock = Lock()
         self.connected = True
+        self.last_safe_stop = ""
 
     def read_bit(self, byte: int, bit: int) -> bool:
         with self._lock:

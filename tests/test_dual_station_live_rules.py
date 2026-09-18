@@ -8,7 +8,7 @@ from threading import Event
 import pytest
 
 from app.ateq import AteqRequest, SerialAteq
-from app.barcode_rules import BarcodeInputError, BarcodeRuleEngine, route_shared_scan
+from app.barcode_rules import BarcodeInputError, BarcodeRuleEngine, route_shared_scan, scanner_code_matches
 from app.barprint import write_field_files
 from app.config import Settings
 from app.models import Measurement, Result, StationId, TraceRecord
@@ -90,6 +90,17 @@ def test_shared_scanner_routes_exactly_one_station():
     with pytest.raises(BarcodeInputError): route_shared_scan("NONE", expected)
     with pytest.raises(BarcodeInputError): route_shared_scan("A-CODE", expected, {StationId.A})
     with pytest.raises(BarcodeInputError): route_shared_scan("SAME", {StationId.A: "SAME", StationId.B: "SAME"})
+
+
+def test_scanner_ignores_only_trailing_fields_after_complete_qr():
+    expected = {StationId.A: "H77A1301003AA#DPPH8#2026091850002",
+                StationId.B: "H77A1301003AA#DPPH8#2026091860002"}
+    assert scanner_code_matches(
+        "H77A1301003AA#DPPH8#2026091860002#EXTRA#IGNORED", expected[StationId.B])
+    assert route_shared_scan(
+        "H77A1301003AA#DPPH8#2026091860002#EXTRA", expected) is StationId.B
+    assert not scanner_code_matches(
+        "H77A1301003AA#DPPH8#2026091860003#EXTRA", expected[StationId.B])
 
 
 def test_printer_fields_use_customer_not_part_and_no_newline(tmp_path):
@@ -174,20 +185,22 @@ def test_ateq_start_uses_modbus_start_coil():
     assert port.writes[4][:-2] == start_payload
 
 
-def test_ateq_requires_exact_idle_to_start_and_new_fifo():
+def test_ateq_monitors_stepcode_sequence_until_65525():
     slave = 1
-    idle = [0, 0, 0, 0, 0xFFFF] + [0] * 8
-    started = [0, 0, 0, 0, 0x0400] + [0] * 8
-    # 现场规则：压力取 StepCode=6 期间的快照，必须存在一帧 StepCode=6。
+    started = [0, 0, 0, 0, 0x0400] + [0] * 8  # StepCode 4
+    middle = [0, 0, 0, 0, 0x0500] + [0] * 8   # StepCode 5
     testing = [0, 0, 0, 0, 0x0600] + [0] * 8
-    ended = [0, 0x0100, 0, 0x2100, 0x0400] + [0] * 8
-    port = QueueSerial([realtime(slave, value) for value in (idle, started, testing, ended)])
+    # Field trace: StepCode 65535 is 0xFFFF on the wire; pre-start idle
+    # 65535 cannot terminate this transaction because no active step preceded it.
+    ended = [0, 0, 0, 0x2100, 0xFFFF] + [0] * 8
+    port = QueueSerial([realtime(slave, value) for value in (started, middle, testing, ended)])
     adapter = SerialAteq("COM_TEST", "A", slave=slave, cycle_timeout_s=0.2,
                          serial_factory=lambda **_: port)
     adapter.program = "3"
     request = AteqRequest("A", "A-cycle", "3", 1, "now")
     result = adapter.run(request)
     assert result.measurement.result is Result.OK and result.request is request
+    assert all(request[1] == 0x03 for request in port.writes)
 
 
 class FakeCursor:
@@ -372,6 +385,20 @@ def test_advance_serial_increments_and_resets_daily(tmp_path):
     assert (tmp_path / "B.txt").read_text(encoding="utf-8") == "0001"
     # A 工位独立计数
     assert engine.advance_serial("E122015400", StationId.A, day1) == "0083"
+
+
+def test_advance_serial_never_rewinds_behind_frozen_cycle(tmp_path):
+    from datetime import datetime as _dt
+    engine = make_engine(tmp_path)
+    day = _dt(2025, 12, 30, 8, 0, 0)
+    # A stale counter on disk must not turn a frozen 0057 cycle into another
+    # 0057 reservation.  The next payload must be 0058 or later.
+    assert engine.advance_serial(
+        "E122015400", StationId.B, day, consumed_serial="0057") == "0058"
+    assert (tmp_path / "B.txt").read_text(encoding="utf-8") == "0058"
+    # Once the file is ahead, a late/stale payload cannot move it backwards.
+    assert engine.advance_serial(
+        "E122015400", StationId.B, day, consumed_serial="0057") == "0059"
 
 
 def test_calibration_serial_c_prefix_independent_and_daily(tmp_path):

@@ -176,8 +176,10 @@ class Calibration:
         self.validation_started = False
         self._clear_pending = False
         self.phase = CalibrationPhase.COMPLETE
+        self.ng_count = self.ok_count = 0
+        self.countdown = 0
         self.sample_demand = ""
-        self.remaining_seconds = 0.0
+        self.remaining_seconds = float(self.period_seconds)
         self._last_tick = time.monotonic()
         self.audit_events.append({"actor": actor, "reason": reason.strip(),
                                   "station": self.station.value if self.station else "",

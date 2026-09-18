@@ -6,7 +6,7 @@ ateq_com_b = "COM6"
 ateq_slave_a = 255
 # B F620 read-only confirmed on the remote host: COM6 / slave 1.
 ateq_slave_b = 1
-ports_confirmed = false
+ports_confirmed = true
 scanner_ip = "192.168.2.10"
 scanner_port = 9004
 database = "test"

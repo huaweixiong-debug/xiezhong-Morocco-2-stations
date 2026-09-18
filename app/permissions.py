@@ -9,7 +9,8 @@ class Role(str, Enum):
 
 def allows(role: Role, action: str) -> bool:
     safe = {"scan", "test", "reset", "query"}
-    dangerous = {"manual_output", "settings", "reprint", "shutdown", "recovery_resolve"}
+    dangerous = {"manual_output", "settings", "reprint", "shutdown", "recovery_resolve",
+                 "calibration_cancel"}
     return action in safe or (action in dangerous and role is Role.ADMIN)
 
 class AuthSession:

@@ -82,9 +82,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--b-slave", type=int, default=1)
     parser.add_argument("--b-program", default=None, help="显式写入 B 工位程序号；省略则只读")
     parser.add_argument("--b-live-ui", action="store_true", help="启动仅 B 工位使用 COM6 的实时 UI")
+    parser.add_argument("--live-ui", action="store_true", help="启动 A/B 两工位独立真实 UI（配置来自 live.toml）")
+    parser.add_argument("--live-config", type=Path, default=None, help="A/B 真实 UI 使用的已验证 live.toml")
     parser.add_argument("--device", choices=["all", "plc", "ateq", "scanner", "database", "printer"], default="all")
     parser.add_argument("--config", type=Path, default=None)
     args = parser.parse_args(argv)
+    if args.live_ui:
+        args.mode = RunMode.LIVE.value
+        args.config = args.live_config or Path(__file__).parents[1] / "config" / "live.toml"
     if args.b_test:
         return run_b_test(args.b_port, args.b_slave, args.b_program)
     config_path = args.config or (Path(__file__).parents[1] / "config" / "default.toml")
@@ -105,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if args.preflight:
             return 0
-    if args.mode != RunMode.SIMULATE.value:
+    if args.mode != RunMode.SIMULATE.value and not args.live_ui:
         print(f"模式 {args.mode} 已实现只读预检；生产 UI 需真实设备验收后启用。", file=sys.stderr)
         return 2
     if args.smoke_cycle:
@@ -121,7 +126,9 @@ def main(argv: list[str] | None = None) -> int:
                 print("UI already running; refusing a second scanner client", file=sys.stderr)
                 return 0
             from .ui import launch_ui
-            return launch_ui(b_live=args.b_live_ui, b_port=args.b_port, b_slave=args.b_slave)
+            return launch_ui(b_live=args.b_live_ui, b_port=args.b_port, b_slave=args.b_slave,
+                             live_all=args.live_ui,
+                             live_config=args.live_config or (config_path if args.live_ui else None))
         except RuntimeError as exc:
             print(f"UI unavailable: {exc}; use --diagnose for headless mode", file=sys.stderr)
             return 3

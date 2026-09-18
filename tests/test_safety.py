@@ -1,14 +1,14 @@
 from pathlib import Path
 import pytest
 from app.journal import CycleJournal
-from app.permissions import Role, allows
+from app.permissions import Role, SecurityContext, allows
 from app.scanner import ScannerGuard
 from app.config import Settings, parse_setup_ini
 from app.models import RunMode, TraceRecord, StationId
 from app.repository import FakeRepository
 from app.calibration import Calibration, CalibrationPhase
 from app.scanner import ScannerFramer
-from app.permissions import AuthSession, Role
+from app.permissions import AuthSession
 
 def test_scanner_rejects_immediate_duplicate():
     guard = ScannerGuard()
@@ -55,3 +55,27 @@ def test_authentication_does_not_allow_role_self_promotion():
     assert session.role is Role.OPERATOR
     assert not session.login("admin", "wrong")
     assert session.login("admin", "simulate-admin") and session.role is Role.ADMIN
+
+def test_calibration_cancel_requires_admin_and_restarts_period():
+    calibration = Calibration(station=StationId.B, initial_due=True,
+                              period_seconds=2 * 60 * 60)
+    security = SecurityContext(AuthSession())
+    with pytest.raises(PermissionError):
+        security.require("calibration_cancel")
+    with pytest.raises(PermissionError):
+        calibration.cancel("operator", "maintenance")
+    assert security.login("admin", "simulate-admin")
+    security.require("calibration_cancel")
+
+    calibration.cancel("admin", "设备维护")
+
+    assert calibration.due is False
+    assert calibration.locked is False
+    assert calibration.validation_started is False
+    assert calibration.remaining_seconds == 2 * 60 * 60
+    assert calibration.phase is CalibrationPhase.COMPLETE
+    event = calibration.audit_events[-1]
+    assert event["actor"] == "admin"
+    assert event["reason"] == "设备维护"
+    assert event["station"] == "B"
+    assert event["time"]

@@ -73,7 +73,7 @@ def test_click_on_disabled_start_button_is_traced(tmp_path):
         window.close()
 
 
-def test_b_trigger_file_dispatch(tmp_path):
+def test_b_trigger_file_cannot_dispatch_a_test(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
     window.show()
@@ -90,21 +90,21 @@ def test_b_trigger_file_dispatch(tmp_path):
 
         trigger.write_text("start", encoding="utf-8")
         window._poll_b_trigger_file()
-        assert calls == ["first"]
+        assert calls == []
         assert not trigger.exists()
 
         card.controller.phase = Phase.WAIT_2
         trigger.write_text("start", encoding="utf-8")
         window._poll_b_trigger_file()
-        assert calls == ["first", "second"]
+        assert calls == []
 
         trigger.write_text("junk", encoding="utf-8")
         window._poll_b_trigger_file()
-        assert calls == ["first", "second"]
+        assert calls == []
         assert not trigger.exists()
 
         window._poll_b_trigger_file()  # no file -> no action
-        assert calls == ["first", "second"]
+        assert calls == []
     finally:
         window.b_live = False
         window.close()

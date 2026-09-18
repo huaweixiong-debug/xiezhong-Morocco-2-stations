@@ -75,6 +75,9 @@ class SerialAteq:
     TEST_FAIL_READ_ADDRESS = 0x203C
     TEST_FAIL_UNIT_ADDRESS = 0x207F
     LEAK_UNIT_CODE_ML_MIN = 51000
+    # Field F620 B returned 0x8020 for the deliberately injected NG sample
+    # on 2026-09-18.  It is a terminal NG result variant, not an alarm.
+    FIELD_NG_STATUS = 0x8020
     UNIT_CODES = {
         0: "cm3/s", 1000: "cm3/min", 2000: "cm3/h", 3000: "mm3/s",
         6000: "Pa", 7000: "Pa(HR)", 8000: "Pa/s", 9000: "Pa/s(HR)",
@@ -90,12 +93,16 @@ class SerialAteq:
             raise ValueError("ATEQ 从站地址必须为 1-255")
         self.port, self.station, self.baudrate = port, station, baudrate
         self.slave, self.timeout_s, self.cycle_timeout_s = int(slave), timeout_s, cycle_timeout_s
+        # The PLC starts the physical tester; this adapter only observes it.
+        self.external_start = True
         self.program = ""
         self.connected = False
         self._serial = None
         self._serial_factory = serial_factory
         self._lock = RLock()
         self._last_fifo: int | None = None
+        self.stepcode_callback = None
+        self._last_reported_stepcode: int | None = None
 
     def connect(self) -> None:
         with self._lock:
@@ -378,6 +385,9 @@ class SerialAteq:
         self._validate(request)
         deadline = time.monotonic() + self.cycle_timeout_s
         active_steps = {4, 5, 6}
+        # F620 field traces show idle/completed StepCode 65535, while some
+        # firmware/configurations report 65525. Accept either only after this
+        # run has observed an active 4/5/6 step; an idle 65535 is not a result.
         completed_steps = {65525, 65535}
         started = False
         last_frame = b""
@@ -388,14 +398,21 @@ class SerialAteq:
             registers, raw = self.read_registers(self.REALTIME_ADDRESS, self.REALTIME_COUNT)
             last_frame = raw
             step_code = self._swap16(registers[4])
+            if step_code != self._last_reported_stepcode:
+                self._last_reported_stepcode = step_code
+                callback = self.stepcode_callback
+                if callback is not None:
+                    try:
+                        callback(step_code)
+                    except Exception:
+                        # A display observer must never interrupt the test read.
+                        pass
             # 诊断时间线：记录 StepCode/状态/FIFO 的变化过程，超时时随异常
             # 抛出，用于远程判断仪器在等待期间的真实行为。
             entry = f"{time.monotonic() - t0:.1f}s step={step_code} status=0x{self._swap16(registers[3]):04X} fifo={self._swap16(registers[1])}"
             if not step_timeline or step_timeline[-1].split(" ", 1)[1] != entry.split(" ", 1)[1]:
                 step_timeline.append(entry)
-            # F620 commissioning rule: 4/5/6 are cycle steps.  The tester
-            # may return 65525 on completion (some firmware exposes 65535),
-            # so do not require a synthetic 65535 -> 4 edge.
+            # The confirmed field sequence is 4/5/6 followed by terminal 65525.
             if step_code in active_steps:
                 started = True
             if step_code == 6:
@@ -404,17 +421,19 @@ class SerialAteq:
                 step6_registers = list(registers)
             status = self._swap16(registers[3])
             fifo = self._swap16(registers[1])
-            terminal = bool(status & 0x0020) or (started and step_code in completed_steps)
+            terminal = started and step_code in completed_steps
             # A result is valid only after this command has produced a real
             # 4/5/6 step (started-flag prevents accepting a stale terminal
             # frame from a previous cycle).  r1 是 FIFO 中的结果个数：每个
             # 周期结束都是 1，不能用它区分新旧结果。
-            if terminal and started:
+            if terminal:
+                if status & 0x0008:
+                    raise RuntimeError("ATEQ 仪器报警")
                 if status & 0x0010:
-                    raise RuntimeError("ATEQ 周期报警")
+                    raise RuntimeError("ATEQ 压力错误")
                 if status & 0x0001:
                     result = Result.OK
-                elif status & 0x0006:
+                elif status & 0x0006 or status == self.FIELD_NG_STATUS:
                     result = Result.NG
                 else:
                     raise RuntimeError(f"ATEQ 周期结束但结果位不明确: 0x{status:04X}")
@@ -427,13 +446,6 @@ class SerialAteq:
                 leakage_unit = self._unit_from_words(registers[11], registers[12])
                 measurement = Measurement(pressure, leakage, result, raw,
                                           pressure_unit, leakage_unit)
-                # 采信后立即清空 FIFO（@02=FFFF），下一个周期的结束计数
-                # 重新从 0→1，本条结果不会被误判为陈旧结果。
-                try:
-                    self.write_register(0x0002, 0xFFFF)
-                except Exception:
-                    pass
-                self._last_fifo = 0
                 return AteqResponse(request, measurement, raw)
             time.sleep(0.05)
         raise TimeoutError(

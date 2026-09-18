@@ -24,13 +24,13 @@ from .license import LicenseVerifier
 from .permissions import AuthSession, SecurityContext
 from .plc import FakePlc, Snap7Plc, POINTS
 from .printer import FakePrinter
-from .barprint import BarTenderCmdPrinter
+from .barprint import BarTenderCmdPrinter, is_calibration_template
 from .repository import FakeRepository, PyMySQLRepository
 from .station import StationController
 from .calibration import Calibration, CalibrationPhase
 from .scanner import ScannerFramer, ScannerGuard
 from .scanner_tcp import TcpScanner
-from .barcode_rules import BarcodeRuleEngine, route_shared_scan
+from .barcode_rules import BarcodeRuleEngine, route_shared_scan, scanner_code_matches
 from .settings_service import ProductSettingsService
 from .model_settings import (BARCODE_RULE_PRESETS, DATE_SCHEME_PRESETS,
                              GlobalSettingsService, ModelConfig,
@@ -139,6 +139,7 @@ class StationPanel(QFrame):
     # Emitted by the ATEQ worker thread; the auto-queued connection runs
     # _finish_test on the GUI thread (QTimer cannot be started cross-thread).
     test_finished = Signal()
+    stepcode_updated = Signal(str)
 
     def __init__(self, station, repository, printer, plc, journal, security,
                  product_provider, confirm_callback, changed_callback,
@@ -156,13 +157,38 @@ class StationPanel(QFrame):
         self.calibration_start_callback = calibration_start_callback
         self.test_finished.connect(self._finish_test)
         self.payload = None
+        self._label_ack_pending = False
         self._error_key = None
         self.controller = StationController(station, repository, printer, ateq or FakeAteq(), journal,
             safe_stop=plc, license_status=security.license_status, security=security)
+        self.stepcode_updated.connect(self._apply_stepcode_display)
+        if hasattr(self.controller.ateq, "stepcode_callback"):
+            self.controller.ateq.stepcode_callback = self.stepcode_updated.emit
         self.setObjectName(f"stationCard_{station.value}")
         self.setFrameShape(QFrame.Shape.Box)
         outer = QVBoxLayout(self); outer.setContentsMargins(14, 0, 14, 4); outer.setSpacing(0)
-        self.station_title = QLabel(f"工位 {station.value} / Station {station.value}"); self.station_title.setObjectName("stationTitle"); outer.addWidget(self.station_title)
+        header = QWidget(self); header.setObjectName(f"stationHeader_{station.value}")
+        header_layout = QHBoxLayout(header); header_layout.setContentsMargins(0, 0, 0, 2); header_layout.setSpacing(8)
+        self.station_title = QLabel(f"工位 {station.value} / Station {station.value}"); self.station_title.setObjectName("stationTitle"); header_layout.addWidget(self.station_title)
+        header_layout.addStretch(1)
+        self.stepcode_frame = QFrame(header); self.stepcode_frame.setObjectName(f"stepCodeFrame_{station.value}")
+        self.stepcode_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self.stepcode_frame.setStyleSheet(
+            "QFrame { border: 1px solid #b9c7d8; border-radius: 5px; background: #ffffff; }"
+            "QLabel { border: 0; background: transparent; }"
+        )
+        stepcode_layout = QHBoxLayout(self.stepcode_frame); stepcode_layout.setContentsMargins(8, 3, 8, 3); stepcode_layout.setSpacing(8)
+        stepcode_caption = QLabel("StepCode"); stepcode_caption.setObjectName(f"stepCodeCaption_{station.value}")
+        stepcode_caption.setProperty("replica_source", "StepCode")
+        self.stepcode_value = QLabel("SIM" if isinstance(self.controller.ateq, FakeAteq) else "读取中")
+        self.stepcode_value.setObjectName(f"stepCodeValue_{station.value}")
+        self.stepcode_value.setProperty("replica_source", self.stepcode_value.text())
+        self.stepcode_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stepcode_value.setMinimumWidth(68)
+        self.stepcode_value.setProperty("state", "info")
+        stepcode_layout.addWidget(stepcode_caption); stepcode_layout.addWidget(self.stepcode_value)
+        header_layout.addWidget(self.stepcode_frame)
+        outer.addWidget(header)
         top = QGridLayout(); top.setHorizontalSpacing(10); top.setVerticalSpacing(2); top.setObjectName(f"stationTopControls_{station.value}")
         self.mode_button = QPushButton(f"Single Test / 单测 {station.value}"); self.mode_button.setObjectName(f"single_dual_{station.value}"); self.mode_button.setCheckable(True); self.mode_button.toggled.connect(self._mode_changed); top.addWidget(QLabel(f"Single/Dual {station.value}"), 0, 0); top.addWidget(self.mode_button, 1, 0)
         self.code_input = QLineEdit(); self.code_input.setObjectName(f"main_code_{station.value}"); self.code_input.setReadOnly(True); self.code = self.code_input; top.addWidget(QLabel(f"2D Code {station.value}"), 0, 1); top.addWidget(self.code_input, 1, 1)
@@ -254,7 +280,22 @@ class StationPanel(QFrame):
             compatibility = QPushButton(self); compatibility.setObjectName(f"{signal}_button_{station.value}")
             compatibility.setFixedSize(0, 0); compatibility.hide()
             self.compatibility_buttons[signal] = compatibility
-            action_layout.addStretch(1)
+            if signal == "calibration_due":
+                cancel_button = QPushButton(f"取消校准 {station.value}", action_slot)
+                cancel_button.setObjectName(f"cancel_calibration_{station.value}")
+                cancel_button.setProperty("compact", True)
+                cancel_button.setProperty("replica_source", f"取消校准 {station.value}")
+                cancel_button.setMinimumWidth(92)
+                cancel_button.setFixedHeight(32)
+                cancel_button.setToolTip("仅管理员可取消，并重新开始本工位校准计时")
+                cancel_button.clicked.connect(
+                    lambda _=False, s=station: self.window().cancel_calibration(s))
+                self.cancel_calibration_button = cancel_button
+                action_layout.addStretch(1)
+                action_layout.addWidget(cancel_button)
+                action_layout.addStretch(1)
+            else:
+                action_layout.addStretch(1)
             tile_layout.addWidget(action_slot)
             self.indicator_tiles[signal] = tile
             indicator_row.addWidget(tile, 1)
@@ -323,7 +364,16 @@ class StationPanel(QFrame):
         except Exception as exc:
             self.payload = None
             self.code_input.clear()
-            self.ateq_no.setText("BLOCKED")
+            # Do not leave the three-character legacy "BLO" artifact in the
+            # program-number field.  The trace keeps the detailed failure;
+            # reset will retry and replace this marker when communication is
+            # available again.
+            self.ateq_no.setText("ERR")
+            trace = getattr(self.window(), "_live_trace", None)
+            if trace is not None:
+                trace(f"ATEQ_PROGRAM_SYNC_FAILED station={self.station.value} "
+                      f"product={self.part_no.currentText().strip()} "
+                      f"{type(exc).__name__}: {exc}")
 
     @staticmethod
     def _configure_table(table):
@@ -366,6 +416,31 @@ class StationPanel(QFrame):
 
     def _point_read(self, signal):
         byte, bit = POINTS[signal][self.station]; return self.plc.read_bit(byte, bit)
+
+    def _send_scan_ok(self, code: str) -> None:
+        """Pulse only this card's confirmed PLC scan-OK bit after a match."""
+        byte, bit = POINTS["scan_ok"][self.station]
+        # A PLC that does not acknowledge/clear the handshake immediately can
+        # leave the previous cycle's bit high.  Force a low edge before the
+        # new confirmed scan pulse so the next high is unambiguously caused by
+        # this label match.
+        try:
+            if self.plc.read_bit(byte, bit):
+                self.plc.write_bit(byte, bit, False)
+                trace = getattr(self.window(), "_live_trace", None)
+                if trace is not None:
+                    trace(f"SCAN_PLC_CLEAR station={self.station.value} "
+                          f"point=M{byte}.{bit} reason=before_confirmed_scan")
+        except Exception:
+            # The confirmed write below remains the authoritative operation;
+            # diagnostics are handled by the live adapter if the readback is
+            # unavailable.
+            pass
+        self.plc.write_bit(byte, bit, True)
+        trace = getattr(self.window(), "_live_trace", None)
+        if trace is not None:
+            trace(f"SCAN_PLC_SIGNAL station={self.station.value} "
+                  f"point=M{byte}.{bit} code={str(code).strip()!r}")
 
     def eventFilter(self, obj, event):
         """Trace clicks that land on the disabled Start Validation button.
@@ -487,27 +562,40 @@ class StationPanel(QFrame):
         code = self.code_input.text() if code is None else code; part_no = part_no or self.part_no.currentText()
         try:
             calibration = self._calibration()
-            # During validation the first scan establishes the calibration
-            # cycle. After an NG/OK calibration label is printed, scanning
-            # that label only acknowledges the PLC; it must not create a new
-            # production cycle.
-            if (calibration is not None and calibration.validation_started
-                    and calibration.phase in (CalibrationPhase.WAIT_OK, CalibrationPhase.COMPLETE)
-                    and self.controller.record is not None
-                    and self.controller.phase is Phase.COMPLETE):
-                byte, bit = POINTS["scan_ok"][self.station]
-                self.plc.write_bit(byte, bit, True)
-                if calibration.clear_pending:
-                    calibration.clear_after_resume()
+            if self._label_ack_pending:
+                record = self.controller.record
+                normalized_code = code.strip()
+                if record is None or not scanner_code_matches(normalized_code, record.code_2d):
+                    # A shared scanner can see unrelated barcodes while the
+                    # operator is finding the freshly printed label.  This is
+                    # a non-terminal condition: keep the acknowledgement
+                    # pending and let the caller continue polling.
+                    trace = getattr(self.window(), "_live_trace", None)
+                    if trace is not None:
+                        trace(f"{self.station.value} LABEL_SCAN_IGNORED code={normalized_code!r}")
+                    self._error_key = None
+                    self.refresh(); self.changed_callback()
+                    return False
+                self._send_scan_ok(normalized_code)
+                self._label_ack_pending = False
+                # Only normal production labels enter this acknowledgement
+                # path. Calibration labels never set _label_ack_pending.
+                if self.controller.phase is Phase.LABELING:
+                    self.controller.phase = Phase.COMPLETE
+                if self.controller.phase is Phase.COMPLETE:
+                    self.controller.reset()
                 self.code_input.setText(code.strip())
                 self._error_key = None
                 self.refresh(); self.changed_callback()
+                trace = getattr(self.window(), "_live_trace", None)
+                if trace is not None:
+                    trace(f"{self.station.value} LABEL_SCAN_ACK code={code.strip()}")
                 return True
             if (calibration is not None and calibration.locked
                     and not (calibration.validation_started and calibration.phase is CalibrationPhase.WAIT_NG)):
                 raise RuntimeError("校准验证未完成，禁止开始新周期")
             if self.payload is not None:
-                if code.strip() != self.payload.barcode_text:
+                if not scanner_code_matches(code, self.payload.barcode_text):
                     raise ValueError("扫码值与当前工位二维码不一致")
                 selection = StationSelection(
                     self.station, self.payload.product_id, self.staff.currentText().strip() or "Operator",
@@ -518,28 +606,43 @@ class StationPanel(QFrame):
             else:
                 self.controller.scan(code, part_no, self.staff.currentText(),
                                      test_mode="dual" if self.mode_button.isChecked() else "single")
-            # 周期已建立：消耗当前流水号并生成下一个（跨日归零），
-            # 同时刷新本工位二维码快照供下一次扫码比对。
-            try:
-                product_for_serial = (self.payload.product_id
-                                      if self.payload is not None else part_no)
-                advancer = getattr(self.window(), "_advance_serial", None)
-                if advancer is not None and product_for_serial:
-                    advancer(self.station, product_for_serial)
-                if self.payload_provider is not None and product_for_serial:
-                    self.payload = self.payload_provider(self.station, product_for_serial)
-                    self.code_input.clear()
-                    self.ateq_no.setText(str(self.payload.ateq_program))
-            except Exception as serial_exc:
+            # In LIVE mode the hardware StepCode=4 edge owns serial
+            # reservation.  Consuming here as well makes a scanner pre-scan
+            # race the hardware edge and can freeze a stale/duplicate payload.
+            if not getattr(self.window(), "live_mode", False):
+                try:
+                    product_for_serial = (self.payload.product_id
+                                          if self.payload is not None else part_no)
+                    advancer = getattr(self.window(), "_advance_serial", None)
+                    if advancer is not None and product_for_serial:
+                        consumed = self.payload.serial_no if self.payload is not None else None
+                        advancer(self.station, product_for_serial,
+                                 consumed_serial=consumed)
+                    if self.payload_provider is not None and product_for_serial:
+                        self.payload = self.payload_provider(self.station, product_for_serial)
+                        self.code_input.clear()
+                        self.ateq_no.setText(str(self.payload.ateq_program))
+                except Exception as serial_exc:
+                    trace = getattr(self.window(), "_live_trace", None)
+                    if trace is not None:
+                        trace(f"{self.station.value} SERIAL_REFRESH_FAILED "
+                              f"{type(serial_exc).__name__}: {serial_exc}")
+            else:
                 trace = getattr(self.window(), "_live_trace", None)
                 if trace is not None:
-                    trace(f"{self.station.value} SERIAL_REFRESH_FAILED "
-                          f"{type(serial_exc).__name__}: {serial_exc}")
+                    trace(f"{self.station.value} SERIAL_DEFERRED owner=ATEQ_STEP_4")
             # The lamps stay visible through the completed validation and are
             # cleared only after this new cycle has been accepted.
             if calibration is not None and calibration.clear_pending:
                 calibration.clear_after_resume()
-            byte, bit = POINTS["scan_ok"][self.station]; self.plc.write_bit(byte, bit, True); self._error_key = None; self.refresh(); self.changed_callback(); return True
+            # The first scan only opens the production cycle.  PLC scan-OK is
+            # deliberately reserved for the second scan of the printed label
+            # in the `_label_ack_pending` branch above.
+            trace = getattr(self.window(), "_live_trace", None)
+            if trace is not None:
+                trace(f"SCAN_ACCEPTED station={self.station.value} "
+                      "awaiting_label_print_and_scan")
+            self._error_key = None; self.refresh(); self.changed_callback(); return True
         except Exception:
             self._error_key = "scan_error"; self.refresh(); return False
 
@@ -559,7 +662,7 @@ class StationPanel(QFrame):
         test_no = 1 if which == "first" else 2
         trace = getattr(self.window(), "_live_trace", None)
         if trace is not None:
-            trace(f"{self.station.value} ATEQ_START_REQUEST test={test_no}")
+            trace(f"{self.station.value} ATEQ_MONITOR_START test={test_no}")
         if getattr(self, "_test_worker_running", False):
             if trace is not None:
                 trace(f"{self.station.value} TEST_REJECTED previous test still running")
@@ -595,6 +698,25 @@ class StationPanel(QFrame):
     def _finish_test(self):
         try:
             self._handle_calibration_measurement()
+            calibration = self._calibration()
+            # A normal production OK ends in LABELING.  The operator-facing
+            # UI has no separate label button, so complete the existing
+            # controller print transaction here.  Calibration samples are
+            # printed by on_calibration_sample() and must not be duplicated.
+            if (calibration is None or not calibration.validation_started) \
+                    and self.controller.phase is Phase.LABELING:
+                record = self.controller.record
+                trace = getattr(self.window(), "_live_trace", None)
+                if record is not None:
+                    measurement = record.second or record.first
+                    if trace is not None and measurement is not None:
+                        trace(f"{self.station.value} TEST_RESULT result={measurement.result.value} "
+                             f"pressure={measurement.pressure}{measurement.pressure_unit} "
+                             f"leakage={measurement.leakage}{measurement.leakage_unit} "
+                             f"raw={measurement.raw_frame.hex()}")
+                    if trace is not None:
+                        trace(f"{self.station.value} LABEL_AUTO_REQUEST cycle={record.cycle_id}")
+                    self.label()
             self.refresh(); self.changed_callback()
         except Exception as exc:
             self._log_crash("FINISH_TEST", exc)
@@ -618,18 +740,30 @@ class StationPanel(QFrame):
             self.window().on_calibration_sample(measurement.result.value, self.station)
 
     def label(self):
+        trace = getattr(self.window(), "_live_trace", None)
+        if trace is not None:
+            trace(f"{self.station.value} LABEL_REQUEST cycle="
+                 f"{getattr(self.controller.record, 'cycle_id', '')}")
         try:
             printed = self.controller.label()
             if printed:
+                self._label_ack_pending = True
+                self._clear_scan_ok("await_label_scan")
                 window = self.window()
                 enable_after_print = getattr(window, "_enable_scanner_after_print", None)
                 if enable_after_print is not None:
                     enable_after_print(self.station, self.controller.print_job_id)
                 self._error_key = None
+                if trace is not None:
+                    trace(f"{self.station.value} LABEL_ACCEPTED job={self.controller.print_job_id}")
             else:
                 self._error_key = "label_error"
-        except Exception:
+                if trace is not None:
+                    trace(f"{self.station.value} LABEL_REJECTED")
+        except Exception as exc:
             self._error_key = "label_error"
+            if trace is not None:
+                trace(f"{self.station.value} LABEL_FAILED {type(exc).__name__}: {exc}")
         self.refresh(); self.changed_callback()
 
     def reprint_label(self):
@@ -639,6 +773,8 @@ class StationPanel(QFrame):
             printed = self.controller.label()
             if not printed:
                 raise RuntimeError("重打标签未确认")
+            self._label_ack_pending = True
+            self._clear_scan_ok("await_reprint_scan")
             window = self.window()
             enable_after_print = getattr(window, "_enable_scanner_after_print", None)
             if enable_after_print is not None:
@@ -648,9 +784,59 @@ class StationPanel(QFrame):
         self.refresh(); self.changed_callback()
 
     def reset(self):
-        try: self.controller.reset(); self.plc.safe_stop(f"UI reset {self.station.value}"); self._error_key = None
+        was_label_ack_pending = self._label_ack_pending
+        # Reset is the explicit operator escape hatch from the post-print
+        # scanner wait.  Clear this UI-only latch even if the controller
+        # reset itself reports an error, so a stale label cannot acknowledge
+        # a later production cycle.
+        self._label_ack_pending = False
+        try:
+            self._clear_scan_ok("reset")
+            if self.controller.recovery_required:
+                # Reset is the operator's explicit escape hatch from a
+                # failed cycle.  Keep the recovery journal/audit trail, but
+                # do not require a second administrator permission check.
+                self.controller.resolve_recovery(
+                    f"UI reset {self.station.value}", require_permission=False)
+            else:
+                self.controller.reset()
+            # Keep the simulation lifecycle marker, but do not disconnect a
+            # live PLC on an operator reset; the next matching scan must still
+            # be able to pulse its station bit.
+            if isinstance(self.plc, FakePlc):
+                self.plc.safe_stop(f"UI reset {self.station.value}")
+            self._error_key = None
+            # Reset is also the operator retry for a transient ATEQ/program
+            # selection failure.  Rebuild the payload and read the program
+            # back so a stale BLOCKED/BLO display is not left behind.
+            self._product_changed()
+            if self.payload is None and self.ateq_no.text() in ("ERR", "BLO", "BLOCKED"):
+                self.ateq_no.setText("---")
+            trace = getattr(self.window(), "_live_trace", None)
+            if trace is not None and self.payload is not None:
+                trace(f"ATEQ_RESET_SYNC station={self.station.value} "
+                      f"program={self.payload.ateq_program}")
         except Exception: self._error_key = "reset_error"
+        trace = getattr(self.window(), "_live_trace", None)
+        if was_label_ack_pending and trace is not None:
+            trace(f"{self.station.value} LABEL_SCAN_CANCELLED_BY_RESET")
         self.refresh(); self.changed_callback()
+
+    def _clear_scan_ok(self, reason: str) -> None:
+        byte, bit = POINTS["scan_ok"][self.station]
+        try:
+            if self.plc.read_bit(byte, bit):
+                self.plc.write_bit(byte, bit, False)
+                trace = getattr(self.window(), "_live_trace", None)
+                if trace is not None:
+                    trace(f"SCAN_PLC_CLEAR station={self.station.value} "
+                          f"point=M{byte}.{bit} reason={reason}")
+        except Exception as exc:
+            trace = getattr(self.window(), "_live_trace", None)
+            if trace is not None:
+                trace(f"SCAN_PLC_CLEAR_FAILED station={self.station.value} "
+                      f"point=M{byte}.{bit} reason={reason} "
+                      f"{type(exc).__name__}: {exc}")
 
     def acknowledge_error(self):
         """Clear only the UI acknowledgement state; service/PLC state is untouched."""
@@ -685,6 +871,17 @@ class StationPanel(QFrame):
         # 界面表格按时间倒序：最新周期显示在第 1 行。
         return sorted((r for r in self.repository.records.values() if r.station is self.station),
                       key=lambda r: r.created_at, reverse=True)
+
+    def set_stepcode(self, value):
+        """Queue a StepCode display update safely from either UI or worker thread."""
+        self.stepcode_updated.emit(str(value))
+
+    def _apply_stepcode_display(self, value: str):
+        self.stepcode_value.setText(value)
+        state = "ok" if value.isdigit() else ("ng" if value in ("离线", "错误") else "info")
+        self.stepcode_value.setProperty("state", state)
+        self.stepcode_value.style().unpolish(self.stepcode_value)
+        self.stepcode_value.style().polish(self.stepcode_value)
 
     def refresh(self):
         c = self.controller; rows = self._records(); self.total_today.setValue(len(rows)); self.ok_today.setValue(sum(1 for r in rows if r.second and r.second.result is Result.OK))
@@ -748,6 +945,14 @@ class StationPanel(QFrame):
             self.start_validation_button.setEnabled(can_start)
             self.start_validation_button.setText(button_caption)
             self.start_validation_button.setToolTip(notice)
+        if hasattr(self, "cancel_calibration_button"):
+            is_admin = getattr(self.window(), "security", None) is not None and \
+                self.window().security.role.value == "admin"
+            cancelable = bool(calibration and (
+                calibration.due or calibration.validation_started or calibration.clear_pending))
+            terminal = c.phase in (Phase.IDLE, Phase.WAIT_SCAN, Phase.COMPLETE)
+            self.cancel_calibration_button.setVisible(is_admin)
+            self.cancel_calibration_button.setEnabled(cancelable and terminal and not c.recovery_required)
         prompts = {"中文": {Phase.IDLE: "扫码", Phase.READY: "一测", Phase.WAIT_2: "二测", Phase.LABELING: "贴标", Phase.COMPLETE: "复位或查询", Phase.FAULT: "管理员恢复"}, "English": {Phase.IDLE: "Scan", Phase.READY: "Test 1", Phase.WAIT_2: "Test 2", Phase.LABELING: "Label", Phase.COMPLETE: "Reset or query", Phase.FAULT: "Admin recovery"}, "Français": {Phase.IDLE: "Scanner", Phase.READY: "Test 1", Phase.WAIT_2: "Test 2", Phase.LABELING: "Étiqueter", Phase.COMPLETE: "Réinitialiser ou requête", Phase.FAULT: "Récupération admin"}}
         narrow_error = bool(self._error_key) and self.window().width() < 1600
         # At the narrow error breakpoint the station card can be only a few
@@ -763,7 +968,7 @@ class StationPanel(QFrame):
         for tile in self.indicator_tiles.values():
             tile.setMinimumWidth(0 if compact_footer else 140)
         if hasattr(self, "start_validation_button"):
-            self.start_validation_button.setMinimumWidth(0 if compact_footer else 140)
+            self.start_validation_button.setMinimumWidth(90 if compact_footer else 140)
             # Two-line English/French captions still need to fit the narrow
             # four-tile row; retain the large button height while reducing
             # only the caption font at that responsive breakpoint.
@@ -804,7 +1009,8 @@ class MainWindow(QMainWindow):
         _write_crash_log(where, exc)
 
     def __init__(self, language: str = "中文", *, b_live: bool = False,
-                 b_port: str = "COM6", b_slave: int = 1):
+                 b_port: str = "COM6", b_slave: int = 1,
+                 live_all: bool = False, config_path: Path | None = None):
         super().__init__(); self.setWindowTitle("Leak Test 2 Channels / 气密检测"); self.resize(METRICS.canonical_width, METRICS.canonical_height); self.setMinimumSize(1100, 700)
         app = QApplication.instance(); family = "Segoe UI"
         for font_path in (Path(r"C:\Windows\Fonts\Noto Sans SC (TrueType).otf"), Path(r"C:\Windows\Fonts\simsun.ttc")):
@@ -813,13 +1019,28 @@ class MainWindow(QMainWindow):
                 if families: family = families[0]; break
         if app: app.setFont(QFont(family))
         self.setStyleSheet(stylesheet())
-        config_path = Path(__file__).parents[1] / "config" / "default.toml"
-        self.settings = Settings.from_toml(config_path) if config_path.exists() else Settings()
+        selected_config = config_path or (Path(__file__).parents[1] / "config" / "default.toml")
+        self.live_all = bool(live_all)
+        self.live_mode = bool(b_live or live_all)
+        self.settings = Settings.from_toml(selected_config) if selected_config.exists() else Settings()
         self.b_live = bool(b_live)
-        self.live_trace_path = Path(r"D:\ATEQ\live_b_trace.log")
+        self.live_trace_path = Path(r"D:\ATEQ\live_trace.log" if self.live_all else r"D:\ATEQ\live_b_trace.log")
         self.b_ateq = None
+        self.live_ateq = {}
         self.b_live_error = ""
-        if self.b_live:
+        if self.live_all:
+            for index, station in enumerate(StationId):
+                adapter = SerialAteq(self.settings.ateq_ports[index], station.value,
+                                     slave=self.settings.ateq_slaves[index], timeout_s=0.8)
+                try:
+                    adapter.connect()
+                    adapter.read_registers(SerialAteq.REALTIME_ADDRESS, 1)
+                except Exception:
+                    adapter.close()
+                    raise
+                self.live_ateq[station] = adapter
+            self.b_ateq = self.live_ateq[StationId.B]
+        elif self.b_live:
             try:
                 self.b_ateq = SerialAteq(b_port, "B", slave=int(b_slave), timeout_s=0.8)
                 self.b_ateq.connect()
@@ -840,15 +1061,15 @@ class MainWindow(QMainWindow):
         # of presenting sample COM values as production truth.
         self.config_warning = ""
         try:
-            if self.settings.setup_path.exists():
+            if not self.live_all and self.settings.setup_path.exists():
                 self.settings = Settings.from_file(self.settings.setup_path)
-            else:
+            elif not self.live_all:
                 self.config_warning = "Setup.ini 未找到 / BLOCKED"
         except Exception as exc:
             self.config_warning = f"配置未确认 / BLOCKED: {exc}"
             self.settings = Settings(config_source="blocked", ports_confirmed=False)
         self.data_dir = Path(r"D:\data")
-        if self.b_live:
+        if self.live_mode:
             # B hardware mode is deliberately all-or-nothing for the real
             # services.  A fake PLC/DB fallback would make a field test look
             # successful while leaving no trace in the real system.
@@ -876,38 +1097,52 @@ class MainWindow(QMainWindow):
         self._calibration_state_path = Path(
             os.environ.get("LEAKTEST_CAL_STATE", r"D:\ATEQ\calibration_state.json"))
         self._restore_calibration(); self.security = SecurityContext(AuthSession(demo=True, password_file=self.data_dir / "管理员.txt"), LicenseVerifier(simulator=True).verify(b"SIMULATE", b"SIMULATE-SIGNATURE")); self.product_settings = ProductSettingsService(self.security); self.model_settings = ModelSettingsService(self.security, self.data_dir / "日期设置.ini"); self.personnel = PersonnelService(self.security, self.data_dir / "作业员列表.txt"); self.global_settings = GlobalSettingsService(self.security, self.data_dir / "全局设置.ini"); self.scanner_framers = {s: ScannerFramer() for s in StationId}; self.scanner_guards = {s: ScannerGuard() for s in StationId}; self.confirmation_callback = self._confirm_output; self._setup_values = {"customer_no":"", "ateq_no":"SIM"}; self.journal_dir = Path(tempfile.mkdtemp(prefix="LeakTest2Channels-replica-")); self.tabs = CompatibilityTabs(); self._language = language if language in UiTextCatalog.LANGUAGES else "中文"; self._i18n_widgets = []
-        self.cards = [StationPanel(s, self.repository, self.printer, self.plc if (not self.b_live or s is StationId.B) else FakePlc(), CycleJournal(self.journal_dir / f"{s.value}.json"), self.security, self.product_settings.current_product, lambda station, signal, requested, current: self.confirmation_callback(station, signal, requested, current), self.refresh_all, self._payload_for, self.personnel.list_all, lambda station: self.calibration[station], self.start_calibration, self.b_ateq if (self.b_live and s is StationId.B) else None) for s in StationId]
-        if self.b_live:
+        self.cards = [StationPanel(s, self.repository, self.printer,
+                                   self.plc,
+                                   CycleJournal(self.journal_dir / f"{s.value}.json"),
+                                   self.security, self.product_settings.current_product,
+                                   lambda station, signal, requested, current: self.confirmation_callback(station, signal, requested, current),
+                                   self.refresh_all, self._payload_for, self.personnel.list_all,
+                                   lambda station: self.calibration[station], self.start_calibration,
+                                   self.live_ateq.get(s)) for s in StationId]
+        if self.b_live and not self.live_all:
             self.cards[0].setEnabled(False)
         self._build_main(); self._build_setup(); self._build_query(); self._build_manual(); self.setCentralWidget(self.tabs)
         self._configure_calibration_period()
         self._update_setup_gate(); self._refresh_models(); self._refresh_personnel(); self._refresh_runtime_choices()
+        if self.live_mode:
+            # Recover a low handshake state after an unclean restart.  A
+            # previous cycle may have left M0.0/M0.1 high until the PLC scan
+            # task acknowledged it.
+            for card in self.cards:
+                card._clear_scan_ok("ui_startup")
         self._refresh_calibration_countdowns()
         self.calibration_timer = QTimer(self)
         self.calibration_timer.setInterval(1000)
         self.calibration_timer.timeout.connect(self._tick_calibration)
         self.calibration_timer.start()
         self.ateq_heartbeat_timer = QTimer(self)
-        self.ateq_heartbeat_timer.setInterval(1000)
+        self.ateq_heartbeat_timer.setInterval(100)
         self.ateq_heartbeat_timer.timeout.connect(self._ateq_heartbeat)
-        self._last_b_plc_start = False
-        self.b_plc_start_timer = QTimer(self)
-        self.b_plc_start_timer.setInterval(100)
-        self.b_plc_start_timer.timeout.connect(self._poll_b_plc_start)
-        # Remote-assist trigger: a command file dropped next to the source
-        # starts one B test without the physical PLC edge.  Every accepted
-        # file is deleted and traced; only the exact token "start" is valid.
+        self._last_b_stepcode = None
+        self._last_live_stepcodes = {station: None for station in StationId}
+        for station, card in zip(StationId, self.cards):
+            card.stepcode_updated.connect(lambda value, current=station: self._remember_live_stepcode(current, value))
+        # Keep read-only/configuration diagnostics, but no file token may
+        # dispatch a test; physical cycles are dispatched only by StepCode=4.
         self.b_trigger_path = Path(__file__).parents[1] / "b_test_trigger.txt"
         self.b_trigger_timer = QTimer(self)
         self.b_trigger_timer.setInterval(1000)
         self.b_trigger_timer.timeout.connect(self._poll_b_trigger_file)
-        if self.b_live:
+        if self.live_mode:
             self.ateq_heartbeat_timer.start()
-            self.b_plc_start_timer.start()
+        if self.b_live:
             self.b_trigger_timer.start()
         self.calibration_status.setText("校准到期，请点击启动验证")
         self._start_shared_scanner()
-        if self.b_live:
+        if self.live_all:
+            self.scanner_status.setText("A/B 真实联机：双 ATEQ + PLC + MySQL + 扫码枪 + 打印机")
+        elif self.b_live:
             self.scanner_status.setText("B 真实联机：COM6 + PLC + MySQL + 扫码枪 + 打印机")
         # Initial screenshot language keeps multilingual tabs, while manual
         # labels are Chinese-first and readable instead of implementation keys.
@@ -929,7 +1164,9 @@ class MainWindow(QMainWindow):
             card.refresh()
 
     def _live_trace(self, message: str) -> None:
-        if not self.b_live:
+        # Keep the legacy B-only diagnostic mode traceable even when tests
+        # enable ``b_live`` after constructing the simulation window.
+        if not (self.live_mode or self.b_live):
             return
         try:
             with self.live_trace_path.open("a", encoding="utf-8", newline="\n") as stream:
@@ -969,6 +1206,20 @@ class MainWindow(QMainWindow):
 
     def _ateq_heartbeat(self):
         """Keep the F620 Modbus session alive with a read-only status poll."""
+        if self.live_all:
+            for station, ateq in self.live_ateq.items():
+                try:
+                    registers, _ = ateq.read_registers(SerialAteq.REALTIME_ADDRESS, SerialAteq.REALTIME_COUNT)
+                    self._handle_live_stepcode(station, SerialAteq._swap16(registers[4]))
+                except Exception as exc:
+                    index = 0 if station is StationId.A else 1
+                    self.cards[index].set_stepcode("离线")
+                    try:
+                        ateq.connect()
+                        ateq.read_registers(SerialAteq.REALTIME_ADDRESS, 1)
+                    except Exception as reconnect_exc:
+                        self._live_trace(f"ATEQ_RECONNECT_FAILED station={station.value} {reconnect_exc}")
+            return
         if not self.b_live or self.b_ateq is None:
             return
         if getattr(self, "_b_test_in_progress", False):
@@ -977,15 +1228,11 @@ class MainWindow(QMainWindow):
         try:
             registers, _ = self.b_ateq.read_registers(
                 SerialAteq.REALTIME_ADDRESS, SerialAteq.REALTIME_COUNT)
-            # M16.1 is the only B production trigger.  This heartbeat is
-            # deliberately read-only: it must not consume an ATEQ frame and
-            # create a database record without the PLC rising edge.  Once the
-            # edge is received, StationController.start_test() sends the
-            # Modbus 0x0001 coil command and SerialAteq.run() owns the
-            # StepCode 4/5/6 -> 65525/65535 state machine.
+            self._handle_b_stepcode(SerialAteq._swap16(registers[4]))
             if hasattr(self, "scanner_status"):
                 self.scanner_status.setToolTip("B ATEQ Modbus 在线：COM6 / 从站1")
         except Exception:
+            self.cards[1].set_stepcode("离线")
             try:
                 self.b_ateq.connect()
                 self.b_ateq.read_registers(SerialAteq.REALTIME_ADDRESS, 1)
@@ -993,56 +1240,180 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "scanner_status"):
                     self.scanner_status.setToolTip(f"B ATEQ Modbus 离线：{reconnect_exc}")
 
-    def _poll_b_plc_start(self):
-        """Capture short M16.1 PLC pulses independently of the ATEQ heartbeat."""
-        if not self.b_live or self.real_plc is None:
-            return
+    def _remember_live_stepcode(self, station, value: str):
         try:
-            plc_start = bool(self.real_plc.read_bit(16, 1))
-        except Exception as exc:
-            self._handle_b_plc_poll_failure(exc)
+            code = int(value)
+        except (TypeError, ValueError):
             return
-        self._b_plc_fail_count = 0
-        if plc_start and not self._last_b_plc_start:
-            card = self.cards[1]
-            self._live_trace(f"PLC_M16_1_RISE phase={card.controller.phase.value}")
-            try:
-                if card.controller.phase is Phase.READY:
-                    card.first()
-                elif card.controller.phase is Phase.WAIT_2:
-                    card.second()
-                elif self._begin_ok_validation_cycle(card):
-                    card.first()
-                else:
-                    self._live_trace("PLC_M16_1_IGNORED no READY calibration cycle")
-            except Exception as exc:
-                self._log_crash("PLC_EDGE_DISPATCH", exc)
-                self._live_trace(f"PLC_M16_1_DISPATCH_FAILED {type(exc).__name__}: {exc}")
-        elif plc_start != self._last_b_plc_start:
-            self._live_trace(f"PLC_M16_1={'ON' if plc_start else 'OFF'}")
-        self._last_b_plc_start = plc_start
+        if self.live_all:
+            if code != self._last_live_stepcodes[station]:
+                self._last_live_stepcodes[station] = code
+                self._live_trace(f"ATEQ_STEP station={station.value} code={code}")
+        elif code != self._last_b_stepcode:
+            self._last_b_stepcode = code
+            self._live_trace(f"ATEQ_STEP code={code}")
 
-    def _handle_b_plc_poll_failure(self, exc: Exception):
-        """Reconnect with a cooldown and trace failures at a bounded rate.
+    def _handle_b_stepcode(self, step_code: int):
+        return self._handle_live_stepcode(StationId.B, step_code)
 
-        Without this a dead PLC link produced one trace line per 100 ms tick
-        (25k+ lines in under an hour) and never attempted to reconnect.
-        """
-        now = time.monotonic()
-        self._b_plc_fail_count = getattr(self, "_b_plc_fail_count", 0) + 1
-        if now - getattr(self, "_b_plc_last_reconnect", 0.0) >= 5.0:
-            self._b_plc_last_reconnect = now
-            try:
-                self.real_plc.connect()
-                self._live_trace("PLC_RECONNECTED")
-                return
-            except Exception as reconnect_exc:
-                exc = reconnect_exc
-        if now - getattr(self, "_b_plc_last_trace", 0.0) >= 10.0:
-            self._b_plc_last_trace = now
+    def _handle_live_stepcode(self, station, step_code: int):
+        """Dispatch one station's stored stage on a new StepCode=4."""
+        card = self.cards[0 if station is StationId.A else 1]
+        previous = self._last_live_stepcodes[station] if self.live_all else self._last_b_stepcode
+        if self.live_all:
+            self._last_live_stepcodes[station] = step_code
+        else:
+            self._last_b_stepcode = step_code
+        card.set_stepcode(step_code)
+        if step_code != 4 or previous == 4:
+            return
+        if card._label_ack_pending:
+            self._live_trace(f"ATEQ_STEP_4_WAIT_LABEL_SCAN station={station.value}")
+            return
+        phase = card.controller.phase
+        if (phase not in (Phase.READY, Phase.WAIT_2)
+                and self._restore_pending_calibration_cycle(card)):
+            phase = card.controller.phase
+        if (phase in (Phase.IDLE, Phase.WAIT_SCAN)
+                and not self.calibration[card.station].locked
+                and not self.calibration[card.station].validation_started
+                and self._prepare_stepcode_production_cycle(card)):
+            phase = card.controller.phase
+        elif (phase is Phase.COMPLETE
+              and not self.calibration[card.station].locked
+              and not self.calibration[card.station].validation_started):
+            # A normal NG result has no label transaction to await. Preserve
+            # its repository row, archive the terminal journal, then reserve
+            # the next frozen selection on the next hardware cycle edge.
+            card.controller.reset()
+            if self._prepare_stepcode_production_cycle(card):
+                phase = card.controller.phase
+        self._live_trace(f"ATEQ_STEP_4_RISE station={station.value} phase={phase.value}")
+        try:
+            if phase is Phase.READY:
+                card.first()
+            elif phase is Phase.WAIT_2:
+                card.second()
+            elif self._begin_ok_validation_cycle(card):
+                card.first()
+            else:
+                self._live_trace(f"ATEQ_STEP_4_IGNORED station={station.value} no READY/WAIT_2 cycle")
+        except Exception as exc:
+            self._log_crash("ATEQ_STEP_DISPATCH", exc)
+            self._live_trace(f"ATEQ_STEP_DISPATCH_FAILED {type(exc).__name__}: {exc}")
+
+    def _prepare_stepcode_production_cycle(self, card) -> bool:
+        """Freeze the selected model/person/mode when hardware starts a cycle."""
+        payload = card.payload
+        if payload is None:
             self._live_trace(
-                f"PLC_M16_1_READ_FAILED x{self._b_plc_fail_count} "
+                f"PRODUCTION_CYCLE_BLOCKED station={card.station.value} no model payload")
+            return False
+        if card.controller.phase not in (Phase.IDLE, Phase.WAIT_SCAN):
+            return False
+        # A restart can reload a QR snapshot that was already committed by a
+        # previous process while the counter file still points at that value.
+        # Never create another database row for an already-used production
+        # serial; walk the persistent counter forward until the payload is new.
+        payload = self._next_unused_production_payload(card)
+        if payload is None:
+            self._live_trace(
+                f"PRODUCTION_CYCLE_BLOCKED station={card.station.value} "
+                "no unused serial payload")
+            return False
+        card._clear_scan_ok("production_cycle_start")
+        mode = "dual" if card.mode_button.isChecked() else "single"
+        selection = StationSelection(
+            card.station, payload.product_id,
+            card.staff.currentText().strip() or "Operator", mode,
+            payload.serial_no, payload.barcode_text, payload.customer_model,
+            str(payload.ateq_program), str(payload.template_path))
+        card.controller.scan_selection(selection)
+        card.code_input.clear()
+        self._advance_serial(card.station, payload.product_id,
+                             consumed_serial=payload.serial_no)
+        try:
+            card.payload = self._payload_for(card.station, payload.product_id)
+            card.ateq_no.setText(str(card.payload.ateq_program))
+        except Exception as exc:
+            self._live_trace(
+                f"NEXT_PAYLOAD_REFRESH_FAILED station={card.station.value} "
                 f"{type(exc).__name__}: {exc}")
+        card.refresh()
+        self._live_trace(
+            f"PRODUCTION_CYCLE_READY station={card.station.value} "
+            f"cycle={card.controller.record.cycle_id} mode={mode} "
+            f"serial={selection.serial_no}")
+        return True
+
+    def _serial_used_by_station(self, station, serial_no: str) -> bool:
+        serial = str(serial_no).strip()
+        if not serial or not serial.isdigit():
+            return False
+        rows = getattr(self.repository, "records", {})
+        values = rows.values() if hasattr(rows, "values") else rows
+        return any(getattr(row, "station", None) is station
+                   and str(getattr(row, "serial_no", "")).strip() == serial
+                   for row in values)
+
+    def _next_unused_production_payload(self, card):
+        """Return a payload not already present in this station's history."""
+        payload = card.payload
+        if payload is None or not self._serial_used_by_station(
+                card.station, payload.serial_no):
+            return payload
+        original = str(payload.serial_no)
+        for _ in range(10000):
+            # First re-read the counter.  If it is already ahead (for example
+            # after a clean restart), this refresh alone avoids skipping it.
+            candidate = self._payload_for(card.station, payload.product_id)
+            if not self._serial_used_by_station(card.station, candidate.serial_no):
+                card.payload = candidate
+                card.ateq_no.setText(str(candidate.ateq_program))
+                self._live_trace(
+                    f"SERIAL_RECONCILE station={card.station.value} "
+                    f"duplicate={original} next={candidate.serial_no}")
+                return candidate
+            self._advance_serial(card.station, payload.product_id,
+                                 consumed_serial=candidate.serial_no)
+        return None
+
+    def _restore_pending_calibration_cycle(self, card) -> bool:
+        """Rebuild a persisted NG/OK calibration cycle after a UI restart.
+
+        Calibration state is persisted, but an in-memory StationController
+        record is not. On a new StepCode=4, restore only the frozen calibration
+        selection; the monitor still performs no PLC/ATEQ start write.
+        """
+        calibration = self.calibration[card.station]
+        controller = card.controller
+        if (not calibration.validation_started
+                or calibration.phase not in (CalibrationPhase.WAIT_NG,
+                                             CalibrationPhase.WAIT_OK)
+                or controller.record is not None
+                or controller.phase not in (Phase.IDLE, Phase.WAIT_SCAN)):
+            return False
+        payload = card.payload
+        if payload is None:
+            self._live_trace(
+                f"CAL_CYCLE_RESTORE_BLOCKED station={card.station.value} no selected model payload")
+            return False
+        cal_payload = self._barcode_engine().generate_calibration(
+            payload.product_id, card.station)
+        selection = StationSelection(
+            card.station, cal_payload.product_id,
+            card.staff.currentText().strip() or "Operator",
+            "single", cal_payload.serial_no, cal_payload.barcode_text,
+            cal_payload.customer_model, str(cal_payload.ateq_program),
+            str(cal_payload.template_path))
+        controller.scan_selection(selection)
+        card.code_input.clear()
+        self._live_trace(
+            f"CAL_CYCLE_RESTORED station={card.station.value} "
+            f"sample={calibration.sample_demand} cycle={controller.record.cycle_id} "
+            f"serial={cal_payload.serial_no}")
+        card.refresh()
+        return True
 
     def _begin_ok_validation_cycle(self, card) -> bool:
         """Bridge NG -> OK validation: archive the NG cycle and start the OK one.
@@ -1050,6 +1421,7 @@ class MainWindow(QMainWindow):
         NG 通过后控制器停在“完成”，而 OK 样件需要一个新测试周期；此前没有任何
         UI 动作能把控制器带回“就绪”。PLC 上升沿和触发文件在派发前先走这里。
         故障相位也接受：先尝试复位归档（需要人工授权时放弃并记录）。
+        This bridge runs only when a new StepCode=4 arrives.
         """
         calibration = self.calibration[card.station]
         if not (calibration.validation_started
@@ -1081,12 +1453,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _poll_b_trigger_file(self):
-        """Start one B test on request from the trigger file (remote assist).
-
-        The test thread owns COM6 exclusively while it runs: the ATEQ
-        heartbeat pauses for the whole transaction, the Modbus start coil is
-        sent first, and run() then polls StepCode until the cycle result.
-        """
+        """Handle bounded diagnostics; test starts are exclusively StepCode-driven."""
         if not self.b_live:
             return
         try:
@@ -1097,7 +1464,6 @@ class MainWindow(QMainWindow):
         except OSError:
             return
         card = self.cards[1]
-        phase = card.controller.phase
         tokens = content.split()
         if tokens and tokens[0] == "readreg":
             # 诊断命令：readreg <hex地址> [count]，先选编辑程序再只读。
@@ -1191,22 +1557,10 @@ class MainWindow(QMainWindow):
                 return
             self._set_b_test_fail_limit(int(tokens[1]))
             return
-        if content != "start":
-            self._live_trace(f"B_FILE_TRIGGER ignored content={content!r}")
+        if content == "start":
+            self._live_trace("B_FILE_TRIGGER rejected: StepCode=4 is the only test trigger")
             return
-        self._live_trace(f"B_FILE_TRIGGER accepted phase={phase.value}")
-        try:
-            if phase is Phase.READY:
-                card.first()
-            elif phase is Phase.WAIT_2:
-                card.second()
-            elif self._begin_ok_validation_cycle(card):
-                card.first()
-            else:
-                self._live_trace(f"B_FILE_TRIGGER rejected phase={phase.value} (需要就绪或等待二测)")
-        except Exception as exc:
-            self._log_crash("B_TRIGGER_DISPATCH", exc)
-            self._live_trace(f"B_FILE_TRIGGER_DISPATCH_FAILED {type(exc).__name__}: {exc}")
+        self._live_trace(f"B_FILE_TRIGGER ignored content={content!r}")
 
     def _barcode_engine(self):
         return BarcodeRuleEngine(self.data_dir / "日期设置.ini",
@@ -1252,19 +1606,24 @@ class MainWindow(QMainWindow):
         engine.publish(payload)
         return payload
 
-    def _advance_serial(self, station, product):
+    def _advance_serial(self, station, product, consumed_serial=None):
         """Advance the daily serial counter after a cycle consumed one.
 
         流水号按周期递增、跨日归零。失败只记录 trace：本周期二维码已冻结，
         阻断后续刷新只会让工位卡在已启动的周期里。
         """
         try:
-            serial = self._barcode_engine().advance_serial(product, station)
-            self._live_trace(f"SERIAL_ADVANCED station={station.value} next={serial}")
+            serial = self._barcode_engine().advance_serial(
+                product, station, consumed_serial=consumed_serial)
+            consumed = "" if consumed_serial is None else f" consumed={consumed_serial}"
+            self._live_trace(
+                f"SERIAL_ADVANCED station={station.value}{consumed} next={serial}")
+            return serial
         except Exception as exc:
             self._live_trace(
                 f"SERIAL_ADVANCE_FAILED station={station.value} "
                 f"{type(exc).__name__}: {exc}")
+            return None
 
     def _refresh_runtime_choices(self):
         products = self.model_settings.list_models()
@@ -1273,7 +1632,7 @@ class MainWindow(QMainWindow):
             card.set_choices(products, people)
 
     def _build_main(self):
-        page = QWidget(); page.setObjectName("page"); root = QVBoxLayout(page); root.setContentsMargins(METRICS.page_margin, 8, METRICS.page_margin, 8); root.setSpacing(METRICS.station_gap); ports = "/".join(self.settings.ateq_ports) if self.settings.ports_confirmed else "BLOCKED/未确认"; self.system_status = QLabel(f"模式：SIMULATE | PLC：{self.settings.plc_ip} | ATEQ：{ports} | Fake services"); self.system_status.setObjectName("systemStatusBar"); self.system_status.setVisible(False); root.addWidget(self.system_status); top = QHBoxLayout(); top.setSpacing(METRICS.station_gap); top.addWidget(self.cards[0], 1); top.addWidget(self.cards[1], 1); root.addLayout(top, 1)
+        page = QWidget(); page.setObjectName("page"); root = QVBoxLayout(page); root.setContentsMargins(METRICS.page_margin, 8, METRICS.page_margin, 8); root.setSpacing(METRICS.station_gap); ports = "/".join(self.settings.ateq_ports) if self.settings.ports_confirmed else "BLOCKED/未确认"; mode_label = "LIVE A/B" if self.live_all else ("LIVE B" if self.b_live else "SIMULATE"); service_label = "real services" if self.live_mode else "Fake services"; self.system_status = QLabel(f"模式：{mode_label} | PLC：{self.settings.plc_ip} | ATEQ：{ports} | {service_label}"); self.system_status.setObjectName("systemStatusBar"); self.system_status.setVisible(False); root.addWidget(self.system_status); top = QHBoxLayout(); top.setSpacing(METRICS.station_gap); top.addWidget(self.cards[0], 1); top.addWidget(self.cards[1], 1); root.addLayout(top, 1)
         # Match Main.vi footer hierarchy: A indicators | login | B indicators
         # | calibration countdown.  The three calibration lamps are bound to
         # each station's local NG -> OK validation state; Start Validation is
@@ -1478,16 +1837,16 @@ class MainWindow(QMainWindow):
         timer = getattr(self, "ateq_heartbeat_timer", None)
         if timer is not None:
             timer.stop()
-        timer = getattr(self, "b_plc_start_timer", None)
+        timer = getattr(self, "b_trigger_timer", None)
         if timer is not None:
             timer.stop()
         scanner = getattr(self, "shared_scanner", None)
         if scanner is not None:
             scanner.close()
-        if self.b_ateq is not None:
-            self.b_ateq.close()
+        for ateq in getattr(self, "live_ateq", {}).values():
+            ateq.close()
         if self.real_plc is not None:
-            self.real_plc.safe_stop("B hardware UI closed")
+            self.real_plc.safe_stop("live hardware UI closed")
         super().closeEvent(event)
 
     def _login_panel(self):
@@ -1498,7 +1857,13 @@ class MainWindow(QMainWindow):
     def _build_setup(self):
         page = QWidget(); page.setObjectName("page"); root = QVBoxLayout(page); root.setContentsMargins(METRICS.page_margin, 12, METRICS.page_margin, 12); root.setSpacing(METRICS.station_gap); title = QLabel("参数设置 / Setup / Coup monté"); title.setObjectName("pageTitle"); root.addWidget(title)
         # --- 管理员登录门禁：设置页参数管理必须先登录 ---
-        gate_row = QHBoxLayout(); self.setup_gate_title = QLabel("设置管理（需登录）"); self.setup_gate_title.setObjectName("setup_gate_title"); gate_row.addWidget(self.setup_gate_title); self.setup_username = QLineEdit(); self.setup_username.setObjectName("setup_username"); self.setup_username.setPlaceholderText("用户名"); self.setup_username.setMaximumWidth(220); gate_row.addWidget(self.setup_username); self.setup_password = QLineEdit(); self.setup_password.setObjectName("setup_password"); self.setup_password.setPlaceholderText("密码"); self.setup_password.setEchoMode(QLineEdit.EchoMode.Password); self.setup_password.setMaximumWidth(220); gate_row.addWidget(self.setup_password); self.setup_login_button = QPushButton("登录"); self.setup_login_button.setObjectName("setup_login"); self.setup_login_button.clicked.connect(self.login_from_setup); gate_row.addWidget(self.setup_login_button); self.setup_gate_status = QLabel("未登录，参数只读"); self.setup_gate_status.setObjectName("setupGateStatus"); gate_row.addWidget(self.setup_gate_status); gate_row.addStretch(1); root.addLayout(gate_row)
+        gate_card = QFrame(); gate_card.setObjectName("setupGateBar")
+        gate_row = QHBoxLayout(gate_card); gate_row.setContentsMargins(12, 6, 12, 6); gate_row.setSpacing(10)
+        self.setup_gate_title = QLabel("设置管理（需登录）"); self.setup_gate_title.setObjectName("setup_gate_title"); gate_row.addWidget(self.setup_gate_title)
+        self.setup_username = QLineEdit(); self.setup_username.setObjectName("setup_username"); self.setup_username.setPlaceholderText("用户名"); self.setup_username.setMaximumWidth(220); gate_row.addWidget(self.setup_username)
+        self.setup_password = QLineEdit(); self.setup_password.setObjectName("setup_password"); self.setup_password.setPlaceholderText("密码"); self.setup_password.setEchoMode(QLineEdit.EchoMode.Password); self.setup_password.setMaximumWidth(220); gate_row.addWidget(self.setup_password)
+        self.setup_login_button = QPushButton("登录"); self.setup_login_button.setObjectName("setup_login"); self.setup_login_button.setProperty("primary", True); self.setup_login_button.clicked.connect(self.login_from_setup); gate_row.addWidget(self.setup_login_button)
+        self.setup_gate_status = QLabel("未登录，参数只读"); self.setup_gate_status.setObjectName("setupGateStatus"); gate_row.addWidget(self.setup_gate_status); gate_row.addStretch(1); root.addWidget(gate_card)
         self.setup_admin_panel = QWidget(); admin = QVBoxLayout(self.setup_admin_panel); admin.setContentsMargins(0, 0, 0, 0); admin.setSpacing(METRICS.station_gap)
         # --- 型号参数区（整行）：表格即列表，单元格直接编辑，行首勾选当前生效型号 ---
         self.model_box = QGroupBox("型号参数"); model_box = self.model_box; model_box.setObjectName("modelPanel"); model_layout = QVBoxLayout(model_box); model_layout.setSpacing(6)
@@ -1514,24 +1879,37 @@ class MainWindow(QMainWindow):
         # --- 底部行：人员列表（左） + 语言/ATEQ端口/校准周期（右） ---
         bottom_row = QHBoxLayout(); bottom_row.setSpacing(METRICS.station_gap)
         self.staff_box = QGroupBox("人员列表（独立管理）"); staff_box = self.staff_box; staff_box.setObjectName("personnelPanel"); staff_box.setMinimumWidth(300); staff_box.setMaximumWidth(460); staff_layout = QVBoxLayout(staff_box); staff_layout.setContentsMargins(12, 16, 12, 12); staff_layout.setSpacing(6); self._loading_personnel = True; self.personnel_table = QTableWidget(20, 1); self.personnel_table.setObjectName("personnel_table"); self.personnel_table.setHorizontalHeaderLabels(["工号/姓名"]); self.personnel_table.verticalHeader().setVisible(False); self.personnel_table.verticalHeader().setDefaultSectionSize(METRICS.input_height - 8); self.personnel_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self.personnel_table.setAlternatingRowColors(True); self.personnel_table.itemChanged.connect(self._on_personnel_changed); staff_layout.addWidget(self.personnel_table, 1); staff_buttons = QHBoxLayout(); self.personnel_hint = QLabel("编辑后点击保存人员；空行忽略"); self.personnel_hint.setObjectName("personnelHint"); self.personnel_hint.setStyleSheet("color: #5d6b80;"); self.personnel_new_button = QPushButton("新建人员"); self.personnel_new_button.setObjectName("personnel_new"); self.personnel_new_button.setMaximumWidth(92); self.personnel_new_button.clicked.connect(self._new_person); self.personnel_delete_button = QPushButton("删除人员"); self.personnel_delete_button.setObjectName("personnel_delete"); self.personnel_delete_button.setMaximumWidth(92); self.personnel_delete_button.clicked.connect(self._remove_person); self.personnel_remove_button = self.personnel_delete_button; self.personnel_save_button = QPushButton("保存人员"); self.personnel_save_button.setObjectName("personnel_save"); self.personnel_save_button.setProperty("primary", True); self.personnel_save_button.setMaximumWidth(92); self.personnel_save_button.clicked.connect(self._save_personnel); staff_buttons.addWidget(self.personnel_hint, 1); staff_buttons.addWidget(self.personnel_new_button); staff_buttons.addWidget(self.personnel_delete_button); staff_buttons.addWidget(self.personnel_save_button); staff_layout.addLayout(staff_buttons); self._loading_personnel = False; bottom_row.addWidget(staff_box, 0)
-        other_card = QFrame(); other_card.setObjectName("settingsCard"); other = QGridLayout(other_card); other.setContentsMargins(16, 16, 16, 16); other.setHorizontalSpacing(10); other.setVerticalSpacing(8)
-        self.language_selector = QComboBox(); self.language_selector.setObjectName("language_selector"); self.language_selector.addItems(list(UiTextCatalog.LANGUAGES)); self.language_selector.currentTextChanged.connect(self.language_changed)
+        other_card = QFrame(); other_card.setObjectName("settingsCard")
+        other_card_layout = QHBoxLayout(other_card); other_card_layout.setContentsMargins(16, 16, 16, 16); other_card_layout.setSpacing(0)
+        settings_fields = QWidget(); settings_fields.setObjectName("settingsFields"); settings_fields.setMaximumWidth(680)
+        other = QGridLayout(settings_fields); other.setContentsMargins(0, 0, 0, 0); other.setHorizontalSpacing(10); other.setVerticalSpacing(8)
+        other.setColumnStretch(0, 0); other.setColumnStretch(1, 1)
+        other_card_layout.addWidget(settings_fields, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop); other_card_layout.addStretch(1)
+        self.language_selector = QComboBox(); self.language_selector.setObjectName("language_selector"); self.language_selector.setMaximumWidth(230); self.language_selector.addItems(list(UiTextCatalog.LANGUAGES)); self.language_selector.currentTextChanged.connect(self.language_changed)
         global_values = self.global_settings.load()
-        self.global_station_a = QLineEdit(global_values.get("工位号A", "8")); self.global_station_a.setObjectName("global_station_a"); self.global_station_a.setMaximumWidth(90); self.global_station_a.editingFinished.connect(self._save_global_settings)
-        self.global_station_b = QLineEdit(global_values.get("工位号B", "9")); self.global_station_b.setObjectName("global_station_b"); self.global_station_b.setMaximumWidth(90); self.global_station_b.editingFinished.connect(self._save_global_settings)
+        self.global_station_a = QLineEdit(global_values.get("工位号A", "5")); self.global_station_a.setObjectName("global_station_a"); self.global_station_a.setMaximumWidth(90); self.global_station_a.editingFinished.connect(self._save_global_settings)
+        self.global_station_b = QLineEdit(global_values.get("工位号B", "6")); self.global_station_b.setObjectName("global_station_b"); self.global_station_b.setMaximumWidth(90); self.global_station_b.editingFinished.connect(self._save_global_settings)
         cal_value = global_values.get("校准周期", "02:00:00"); cal_time = QTime.fromString(cal_value, "HH:mm:ss")
-        self.cal_period = QTimeEdit(cal_time if cal_time.isValid() else QTime(0,0)); self.cal_period.setObjectName("calibration_period"); self.cal_period.editingFinished.connect(self._save_global_settings)
+        self.cal_period = QTimeEdit(cal_time if cal_time.isValid() else QTime(0,0)); self.cal_period.setObjectName("calibration_period"); self.cal_period.setMaximumWidth(170); self.cal_period.editingFinished.connect(self._save_global_settings)
         port_items = list(self.settings.ateq_ports) if self.settings.ports_confirmed else ["BLOCKED/未确认"]
-        self.ateq_a = QComboBox(); self.ateq_a.setObjectName("ateq_com_A"); self.ateq_a.addItems(port_items); self.ateq_a.setCurrentText(self.settings.ateq_ports[0] if self.settings.ports_confirmed else "BLOCKED/未确认"); self.ateq_a.setEnabled(self.settings.ports_confirmed); self.ateq_com_A = self.ateq_a
-        self.ateq_b = QComboBox(); self.ateq_b.setObjectName("ateq_com_B"); self.ateq_b.addItems(port_items); self.ateq_b.setCurrentText(self.settings.ateq_ports[1] if self.settings.ports_confirmed else "BLOCKED/未确认"); self.ateq_b.setEnabled(self.settings.ports_confirmed); self.ateq_com_B = self.ateq_b
+        self.ateq_a = QComboBox(); self.ateq_a.setObjectName("ateq_com_A"); self.ateq_a.setMaximumWidth(240); self.ateq_a.addItems(port_items); self.ateq_a.setCurrentText(self.settings.ateq_ports[0] if self.settings.ports_confirmed else "BLOCKED/未确认"); self.ateq_a.setEnabled(self.settings.ports_confirmed); self.ateq_com_A = self.ateq_a
+        self.ateq_b = QComboBox(); self.ateq_b.setObjectName("ateq_com_B"); self.ateq_b.setMaximumWidth(240); self.ateq_b.addItems(port_items); self.ateq_b.setCurrentText(self.settings.ateq_ports[1] if self.settings.ports_confirmed else "BLOCKED/未确认"); self.ateq_b.setEnabled(self.settings.ports_confirmed); self.ateq_com_B = self.ateq_b
         self.setup_scanner = QLabel("● Scanner"); self.setup_scanner.setObjectName("setup_scanner_indicator"); self.setup_scanner.setProperty("state", "ng")
         self.global_label_a = QLabel("工位号 A"); self.global_label_b = QLabel("工位号 B")
-        other.addWidget(QLabel("Language"), 0, 0); other.addWidget(self.language_selector, 0, 1)
-        other.addWidget(self.global_label_a, 1, 0); other.addWidget(self.global_station_a, 1, 1)
-        other.addWidget(self.global_label_b, 2, 0); other.addWidget(self.global_station_b, 2, 1)
-        other.addWidget(QLabel("Calibration Period (Hours)"), 3, 0); other.addWidget(self.cal_period, 3, 1)
-        other.addWidget(QLabel("ATEQ F620 A (Restart Software to Active)"), 4, 0); other.addWidget(self.ateq_a, 4, 1)
-        other.addWidget(QLabel("ATEQ F620 B (Restart Software to Active)"), 5, 0); other.addWidget(self.ateq_b, 5, 1)
+        self.settings_language_label = QLabel("Language"); self.settings_language_label.setObjectName("settingsLanguageLabel")
+        self.cal_period_label = QLabel("Calibration Period (Hours)"); self.cal_period_label.setObjectName("calibrationPeriodLabel")
+        self.ateq_label_a = QLabel("ATEQ F620 A (Restart Software to Active)"); self.ateq_label_a.setObjectName("ateqLabelA")
+        self.ateq_label_b = QLabel("ATEQ F620 B (Restart Software to Active)"); self.ateq_label_b.setObjectName("ateqLabelB")
+        setting_labels = (self.settings_language_label, self.global_label_a, self.global_label_b, self.cal_period_label, self.ateq_label_a, self.ateq_label_b)
+        for label in setting_labels:
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        left_aligned = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        other.addWidget(self.settings_language_label, 0, 0); other.addWidget(self.language_selector, 0, 1, left_aligned)
+        other.addWidget(self.global_label_a, 1, 0); other.addWidget(self.global_station_a, 1, 1, left_aligned)
+        other.addWidget(self.global_label_b, 2, 0); other.addWidget(self.global_station_b, 2, 1, left_aligned)
+        other.addWidget(self.cal_period_label, 3, 0); other.addWidget(self.cal_period, 3, 1, left_aligned)
+        other.addWidget(self.ateq_label_a, 4, 0); other.addWidget(self.ateq_a, 4, 1, left_aligned)
+        other.addWidget(self.ateq_label_b, 5, 0); other.addWidget(self.ateq_b, 5, 1, left_aligned)
         self.settings_status = QLabel("已提交：SIM-PART"); self.settings_status.setObjectName("settingsStatus"); other.addWidget(self.settings_status, 6, 0, 1, 2)
         other.addWidget(self.setup_scanner, 7, 0); self.calibration_status = QLabel("等待 NG 样件"); self.calibration_status.setObjectName("calibrationStatus"); other.addWidget(self.calibration_status, 7, 1)
         bottom_row.addWidget(other_card, 1)
@@ -1599,15 +1977,22 @@ class MainWindow(QMainWindow):
             self.username.setText(self.setup_username.text()); self.password.setText(self.setup_password.text())
             self.login_status.setText({"中文": "已认证", "English": "Authenticated", "Français": "Authentifié"}[self._language])
             self._update_setup_gate()
+            for card in self.cards:
+                card.refresh()
             self.setup_password.clear()
         else:
             self.setup_gate_status.setText(self._setup_gate_texts()["denied"])
-    def _template_choices(self, station_letter):
-        directory = Path(r"D:\data")
-        names = []
-        if directory.exists():
-            names = sorted(p.name for p in directory.glob(f"*-{station_letter}.btw"))
-        return names
+    def _template_choices(self, station_letter=None):
+        """List ordinary templates; A/B assignment comes from the column, not filename."""
+        directory = Path(self.data_dir)
+        if not directory.is_dir():
+            return []
+        return sorted(
+            path.name for path in directory.iterdir()
+            if path.is_file()
+            and path.suffix.casefold() == ".btw"
+            and not is_calibration_template(path)
+        )
 
     # 0..7 are the production surface.  Column 8 remains hidden only to keep
     # binary/UI automation compatibility with the first nine-column release.
@@ -1635,8 +2020,7 @@ class MainWindow(QMainWindow):
                     combo.setCurrentIndex(index); break
             return combo
         else:
-            station = kind.rsplit("_", 1)[-1].upper()
-            choices = [str(Path(r"D:\data") / name) for name in self._template_choices(station)]
+            choices = [str(Path(self.data_dir) / name) for name in self._template_choices()]
             if value and value not in choices:
                 choices.insert(0, value)
             combo.addItems(choices)
@@ -1699,6 +2083,11 @@ class MainWindow(QMainWindow):
         for column, width in minimums.items():
             if table.columnWidth(column) < width:
                 table.setColumnWidth(column, width)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(6, 240)
+        table.setColumnWidth(7, 240)
         table.setColumnHidden(8, True)
     def _refresh_models(self, select_part=None):
         """把 日期设置.ini 里的型号刷进表格；行首勾选当前生效型号。"""
@@ -1881,9 +2270,13 @@ class MainWindow(QMainWindow):
             self.personnel_hint.setText({"中文": f"删除拒绝：{exc}", "English": f"Delete denied: {exc}", "Français": f"Suppression refusée : {exc}"}[self._language])
 
     def _build_query(self):
-        page = QWidget(); page.setObjectName("page"); root = QVBoxLayout(page); root.setContentsMargins(METRICS.page_margin, 12, METRICS.page_margin, 12); root.setSpacing(METRICS.station_gap); filters = QHBoxLayout(); filters.setSpacing(METRICS.station_gap); self.query_fields = {}
+        page = QWidget(); page.setObjectName("page"); root = QVBoxLayout(page); root.setContentsMargins(METRICS.page_margin, 16, METRICS.page_margin, 16); root.setSpacing(METRICS.station_gap)
+        title = QLabel("查询记录 / Test Records"); title.setObjectName("pageTitle"); title.setProperty("replica_source", "查询记录 / Test Records"); root.addWidget(title)
+        hint_source = "两工位独立查询 · 支持时间、条码和结果 / Search station records by time, code, and result"
+        hint = QLabel(hint_source); hint.setObjectName("pageSubtitle"); hint.setProperty("replica_source", hint_source); root.addWidget(hint)
+        filters = QHBoxLayout(); filters.setSpacing(METRICS.station_gap); self.query_fields = {}
         for s in StationId:
-            group = QGroupBox(f"{s.value} List Search"); group.setObjectName(f"queryFilters_{s.value}"); grid = QGridLayout(group); grid.setContentsMargins(10, 16, 10, 10); grid.setVerticalSpacing(6)
+            group = QGroupBox(f"{s.value} List Search"); group.setObjectName(f"queryFilters_{s.value}"); group.setProperty("queryFilterCard", True); grid = QGridLayout(group); grid.setContentsMargins(12, 18, 12, 12); grid.setHorizontalSpacing(9); grid.setVerticalSpacing(7)
             for row, (key, label) in enumerate((("start", "Start Time"),("finish", "Finish Time"),("code", "2D Code"),("result", "Result"))):
                 if key in {"start", "finish"}:
                     widget = QDateTimeEdit(QDateTime.currentDateTime()); widget.setCalendarPopup(True); widget.setDisplayFormat("yyyy-MM-dd HH:mm:ss"); widget.setDateTime(QDateTime.currentDateTime().addDays(-1 if key == "start" else 1))
@@ -1891,43 +2284,59 @@ class MainWindow(QMainWindow):
                     widget = QLineEdit()
                 widget.setObjectName(f"query_{key}_{s.value}"); self.query_fields[(s,key)] = widget; grid.addWidget(QLabel(f"{label} {s.value}"),row,0); grid.addWidget(widget,row,1)
             status = QLabel(); status.setObjectName(f"query_status_{s.value}"); self.query_status = getattr(self, "query_status", {}); self.query_status[s] = status; grid.addWidget(status,5,0,1,2)
-            search = QPushButton(f"Search {s.value}"); search.setObjectName(f"query_search_{s.value}"); search.clicked.connect(self.refresh_query); download = QPushButton(f"Download {s.value}"); download.setObjectName(f"query_download_{s.value}"); download.clicked.connect(lambda _=False, station=s: self.download_query(station)); grid.addWidget(search,4,0); grid.addWidget(download,4,1); filters.addWidget(group)
+            search = QPushButton(f"Search {s.value}"); search.setObjectName(f"query_search_{s.value}"); search.setProperty("primary", True); search.clicked.connect(self.refresh_query)
+            download = QPushButton(f"Download {s.value}"); download.setObjectName(f"query_download_{s.value}"); download.clicked.connect(lambda _=False, station=s: self.download_query(station))
+            actions = QHBoxLayout(); actions.setSpacing(8); actions.addWidget(search, 1); actions.addWidget(download, 1); grid.addLayout(actions, 4, 0, 1, 2); filters.addWidget(group)
         root.addLayout(filters); tables = QHBoxLayout(); tables.setSpacing(METRICS.station_gap); self.query_tables = {}
         for s in StationId:
             table = QTableWidget(30,10); table.setObjectName(f"query_table_{s.value}"); table.setHorizontalHeaderLabels(DISPLAY_HEADERS["base"]); table.setAlternatingRowColors(True); table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed); table.verticalHeader().setDefaultSectionSize(METRICS.table_row_height); StationPanel._configure_table(table); [table.setRowHeight(i, METRICS.table_row_height) for i in range(30)]; self.query_tables[s] = table; tables.addWidget(table, 1)
         root.addLayout(tables,1); self.query_edit = self.query_fields[(StationId.A,"code")]; self.table = self.query_tables[StationId.A]; self.tabs.addTab(page, "查询/Query/Requête")
 
     def _build_manual(self):
-        page = QWidget(); page.setObjectName("page"); root = QHBoxLayout(page); root.setContentsMargins(METRICS.page_margin, 12, METRICS.page_margin, 12); root.setSpacing(METRICS.station_gap)
+        page = QWidget(); page.setObjectName("page"); page.setProperty("manualPage", True)
+        root = QVBoxLayout(page); root.setContentsMargins(METRICS.page_margin, 16, METRICS.page_margin, 16); root.setSpacing(METRICS.station_gap)
         self._manual_extensions = []
+        header = QHBoxLayout(); header.setSpacing(16)
+        heading = QVBoxLayout(); heading.setSpacing(3)
+        title = QLabel("手动控制 / Manual Controls"); title.setObjectName("manualPageTitle")
+        title.setProperty("replica_source", "手动控制 / Manual Controls")
+        hint_source = "手动输出需管理员授权 · PLC 状态实时回读 / Admin authorization required · live PLC state"
+        hint = QLabel(hint_source); hint.setObjectName("manualPageHint"); hint.setProperty("replica_source", hint_source)
+        heading.addWidget(title); heading.addWidget(hint); header.addLayout(heading, 1)
+        toggle = QPushButton("显示扩展 / Extensions"); toggle.setObjectName("manual_extension_toggle"); toggle.setProperty("compact", True); toggle.clicked.connect(self.toggle_manual_extension); header.addWidget(toggle, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        root.addLayout(header)
+        stations = QHBoxLayout(); stations.setSpacing(METRICS.station_gap)
         for s in StationId:
-            group = QGroupBox(f"工位 {s.value} / Station {s.value}"); group.setObjectName(f"manualGroup_{s.value}"); group.setProperty("stationTitle", True); layout = QVBoxLayout(group); layout.setContentsMargins(16, 20, 16, 16); layout.setSpacing(10)
+            group = QGroupBox(f"工位 {s.value} / Station {s.value}"); group.setObjectName(f"manualGroup_{s.value}"); group.setProperty("stationTitle", True); layout = QVBoxLayout(group); layout.setContentsMargins(14, 22, 14, 14); layout.setSpacing(9)
             for signal, title, states in MANUAL_NAMES:
-                row = QHBoxLayout(); row.setSpacing(8); label_widget = QLabel(f"{s.value}{title}"); label_widget.setObjectName(f"manual_label_{signal}_{s.value}"); label_widget.setMinimumWidth(220); row.addWidget(label_widget, 1)
+                row_frame = QFrame(); row_frame.setObjectName(f"manualRow_{signal}_{s.value}"); row_frame.setProperty("manualControlRow", True); row_frame.setMinimumHeight(68)
+                row = QHBoxLayout(row_frame); row.setContentsMargins(12, 8, 12, 8); row.setSpacing(8)
+                label_widget = QLabel(f"{s.value}{title}"); label_widget.setObjectName(f"manual_label_{signal}_{s.value}"); label_widget.setProperty("manualControlLabel", True); label_widget.setMinimumWidth(118); label_widget.setMaximumWidth(172); row.addWidget(label_widget, 1)
                 # The legacy unsuffixed button remains the safe toggle entry
                 # point for existing callers; explicit target buttons below
                 # make the intended PLC state unambiguous to operators.
-                button = QPushButton("状态切换 / Toggle"); button.setObjectName(f"manual_{signal}_{s.value}"); button.clicked.connect(lambda _=False, station=s, sig=signal, b=button: self.manual_output(b, station, sig)); row.addWidget(button)
+                button = QPushButton("状态切换 / Toggle"); button.setObjectName(f"manual_{signal}_{s.value}"); button.setProperty("compact", True); button.setProperty("manualToggle", True); button.setMinimumWidth(82); button.clicked.connect(lambda _=False, station=s, sig=signal, b=button: self.manual_output(b, station, sig)); row.addWidget(button)
                 if signal in {"clamp", "transfer", "block", "stamp"}:
                     for state, text in ((False, UiTextCatalog.action(self._language, "back")), (True, UiTextCatalog.action(self._language, "forward"))):
-                        target = QPushButton(text); target.setObjectName(f"manual_{signal}_{s.value}_{'forward' if state else 'back'}"); target.clicked.connect(lambda _=False, station=s, sig=signal, value=state, b=target: self._manual_target_action(station, sig, value, b)); row.addWidget(target)
+                        target = QPushButton(text); target.setObjectName(f"manual_{signal}_{s.value}_{'forward' if state else 'back'}"); target.setProperty("compact", True); target.setMinimumWidth(54); target.clicked.connect(lambda _=False, station=s, sig=signal, value=state, b=target: self._manual_target_action(station, sig, value, b)); row.addWidget(target)
                 elif signal == "door_disable":
                     for state, key in ((False, "enable"), (True, "disable")):
-                        target = QPushButton(UiTextCatalog.action(self._language, key)); target.setObjectName(f"manual_{signal}_{s.value}_{key}"); target.clicked.connect(lambda _=False, station=s, sig=signal, value=state, b=target: self._manual_target_action(station, sig, value, b)); row.addWidget(target)
+                        target = QPushButton(UiTextCatalog.action(self._language, key)); target.setObjectName(f"manual_{signal}_{s.value}_{key}"); target.setProperty("compact", True); target.setMinimumWidth(54); target.clicked.connect(lambda _=False, station=s, sig=signal, value=state, b=target: self._manual_target_action(station, sig, value, b)); row.addWidget(target)
                 else:
                     for state, key in ((False, "automatic"), (True, "manual")):
-                        target = QPushButton(UiTextCatalog.action(self._language, key)); target.setObjectName(f"manual_{signal}_{s.value}_{key}"); target.clicked.connect(lambda _=False, station=s, sig=signal, value=state, b=target: self._manual_target_action(station, sig, value, b)); row.addWidget(target)
-                readback = QLabel("● OFF"); readback.setObjectName(f"manual_readback_{signal}_{s.value}"); readback.setProperty("state", "info"); readback.setAlignment(Qt.AlignmentFlag.AlignCenter); row.addWidget(readback)
-                layout.addLayout(row)
+                        target = QPushButton(UiTextCatalog.action(self._language, key)); target.setObjectName(f"manual_{signal}_{s.value}_{key}"); target.setProperty("compact", True); target.setMinimumWidth(54); target.clicked.connect(lambda _=False, station=s, sig=signal, value=state, b=target: self._manual_target_action(station, sig, value, b)); row.addWidget(target)
+                readback = QLabel("● OFF"); readback.setObjectName(f"manual_readback_{signal}_{s.value}"); readback.setProperty("manualReadback", True); readback.setProperty("state", "info"); readback.setAlignment(Qt.AlignmentFlag.AlignCenter); readback.setMinimumWidth(72); readback.setMaximumHeight(34); row.addWidget(readback)
+                layout.addWidget(row_frame)
             # Compatibility aliases for the diagnostic pressure/start points;
             # they remain hidden so the operator page has exactly six rows.
             for signal, title in (("pressure", "正/负压 / Pressure"), ("start", "启动 / Start")):
                 alias = QPushButton(f"{title}: OFF"); alias.setObjectName(f"manual_{signal}_{s.value}"); alias.clicked.connect(lambda _=False, station=s, sig=signal, b=alias: self.manual_output(b, station, sig)); alias.setVisible(False); self._manual_extensions.append(alias); layout.addWidget(alias)
-            root.addWidget(group, 1)
+            stations.addWidget(group, 1)
+        root.addLayout(stations, 1)
         recovery = QGroupBox("管理员恢复 / Recovery"); recovery.setObjectName("recoveryPanel"); recovery.setVisible(False); self._manual_recovery = recovery; rl = QVBoxLayout(recovery); self.recovery_reason = QLineEdit(); self.recovery_reason.setObjectName("recovery_reason"); self.recovery_reason.setPlaceholderText("处理原因 / reason"); rl.addWidget(self.recovery_reason); self.recovery_status = QLabel("无恢复操作"); self.recovery_status.setObjectName("recoveryStatus"); rl.addWidget(self.recovery_status)
         for s in StationId:
             b = QPushButton(f"归档工位 {s.value}"); b.setObjectName(f"resolve_recovery_{s.value}"); b.clicked.connect(lambda _=False, station=s: self.resolve_recovery(station, self.recovery_reason.text() or "UI 人工确认")); rl.addWidget(b)
-        root.addWidget(recovery); toggle = QPushButton("显示扩展 / Extensions"); toggle.setObjectName("manual_extension_toggle"); toggle.clicked.connect(self.toggle_manual_extension); root.addWidget(toggle); self.tabs.addTab(page, "手动/Manual/Manuelle")
+        root.addWidget(recovery); self.tabs.addTab(page, "手动/Manual/Manuelle")
 
     def command_manual_target(self, station: StationId, signal: str, target: bool) -> bool:
         """Write one explicit manual target after role and confirmation gates.
@@ -1987,6 +2396,8 @@ class MainWindow(QMainWindow):
         ok = self.security.login(self.username.text(), self.password.text())
         self.login_status.setText({"中文": ("已认证" if ok else "登录失败"), "English": ("Authenticated" if ok else "Sign-in failed"), "Français": ("Authentifié" if ok else "Échec de connexion")} [self._language])
         self._update_setup_gate()
+        for card in self.cards:
+            card.refresh()
     def controlled_exit(self):
         try: self.security.require("shutdown"); self.plc.safe_stop("controlled UI exit"); self.close()
         except Exception: self.login_status.setText({"中文": "退出拒绝：权限不足", "English": "Exit denied: permission required", "Français": "Sortie refusée : autorisation requise"}[self._language])
@@ -2034,6 +2445,9 @@ class MainWindow(QMainWindow):
                 # over two lines so the same responsive tile width remains
                 # readable on the 1366px layout.
                 widget.setText({"中文": "启动验证", "English": "Start\nValidation", "Français": "Validation\nDémarrage"}[value])
+            elif widget.objectName().startswith("cancel_calibration_"):
+                station = widget.objectName().rsplit("_", 1)[-1]
+                widget.setText({"中文": f"取消校准 {station}", "English": f"Cancel calibration {station}", "Français": f"Annuler calibration {station}"}[value])
             elif widget.objectName().startswith("query_search_"):
                 station = widget.objectName().rsplit("_", 1)[-1]
                 widget.setText({"中文": f"查询 {station}", "English": f"Search {station}", "Français": f"Rechercher {station}"}[value])
@@ -2131,6 +2545,7 @@ class MainWindow(QMainWindow):
                 "period_seconds": cal.period_seconds,
                 "clear_pending": cal.clear_pending,
                 "sample_demand": cal.sample_demand,
+                "audit_events": [dict(event) for event in cal.audit_events],
             }
         signature = repr(sorted(snapshot.items()))
         if signature == getattr(self, "_calibration_signature", None):
@@ -2154,6 +2569,11 @@ class MainWindow(QMainWindow):
             state = snapshot.get(station.value)
             if not isinstance(state, dict):
                 continue
+            audit_events = state.get("audit_events", [])
+            if isinstance(audit_events, list):
+                cal.audit_events = [
+                    {str(key): str(value) for key, value in event.items()}
+                    for event in audit_events if isinstance(event, dict)]
             # 只恢复验证进行中的状态（等待 NG/OK 样件）。倒计时运行中的
             # 状态不恢复：重启后重新要求启动验证，属安全侧行为。
             if not state.get("validation_started"):
@@ -2194,6 +2614,53 @@ class MainWindow(QMainWindow):
             self._live_trace(f"CAL_TICK_FAILED {type(exc).__name__}: {exc}")
             self._log_crash("CAL_TICK", exc)
 
+    def cancel_calibration(self, station, reason=None) -> bool:
+        """Admin-only cancellation for one station; restart its own period."""
+        try:
+            self.security.require("calibration_cancel")
+            calibration = self.calibration[station]
+            card = self._card_for_station(station)
+            if not (calibration.due or calibration.validation_started or calibration.clear_pending):
+                raise RuntimeError("当前工位没有待取消的校准状态")
+            if card.controller.phase not in (Phase.IDLE, Phase.WAIT_SCAN, Phase.COMPLETE):
+                raise RuntimeError("当前测试尚未结束，不能取消校准")
+            if reason is None:
+                prompts = {
+                    "中文": (f"取消工位 {station.value} 校准", "请输入取消原因："),
+                    "English": (f"Cancel station {station.value} calibration", "Enter a reason:"),
+                    "Français": (f"Annuler calibration poste {station.value}", "Saisissez le motif :"),
+                }
+                title, prompt = prompts[self._language]
+                reason, accepted = QInputDialog.getText(self, title, prompt)
+                if not accepted:
+                    return False
+            reason = str(reason).strip()
+            if not reason:
+                raise ValueError("取消校准需要填写原因")
+            actor = self.security.session.username
+            calibration.cancel(actor, reason)
+            self._persist_calibration()
+            self._set_calibration_countdown(station, calibration.remaining_seconds)
+            card.refresh()
+            messages = {
+                "中文": f"工位 {station.value} 已取消校准，重新计时",
+                "English": f"Station {station.value} calibration cancelled; timer restarted",
+                "Français": f"Calibration du poste {station.value} annulée ; minuterie redémarrée",
+            }
+            self.calibration_status.setText(messages[self._language])
+            self._live_trace(
+                f"CAL_CANCELLED station={station.value} actor={actor} reason={reason}")
+            return True
+        except Exception as exc:
+            self.calibration_status.setText({
+                "中文": f"取消校准失败：{exc}",
+                "English": f"Calibration cancellation failed: {exc}",
+                "Français": f"Échec de l'annulation : {exc}",
+            }[self._language])
+            self._live_trace(
+                f"CAL_CANCEL_FAILED station={station.value} {type(exc).__name__}: {exc}")
+            return False
+
     def _trace_start_button_state(self) -> None:
         """Periodically record the Start Validation button state.
 
@@ -2219,8 +2686,8 @@ class MainWindow(QMainWindow):
         try:
             period_seconds = self._calibration_period_seconds()
             self.global_settings.save({
-                "工位号A": self.global_station_a.text().strip() or "8",
-                "工位号B": self.global_station_b.text().strip() or "9",
+                "工位号A": self.global_station_a.text().strip() or "5",
+                "工位号B": self.global_station_b.text().strip() or "6",
                 "校准周期": self.cal_period.time().toString("HH:mm:ss"),
             })
             for calibration in self.calibration.values():
@@ -2229,17 +2696,90 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.settings_status.setText({"中文": f"设置拒绝：{exc}", "English": f"Settings denied: {exc}", "Français": f"Paramètres refusés : {exc}"}[self._language])
     def route_shared_scanner_code(self, code):
-        expected = {card.station: card.payload.barcode_text for card in self.cards if card.payload is not None}
-        busy = {card.station for card in self.cards if card.controller.phase not in (Phase.IDLE, Phase.WAIT_SCAN)}
+        # A pending printed label owns the shared scanner until it is
+        # acknowledged or reset.  Route arbitrary frames to the sole pending
+        # station so irrelevant codes can be ignored without becoming a UI
+        # fault.  If both stations are waiting, only an exact label match is
+        # actionable; all other frames remain harmlessly ignored.
+        pending_cards = [card for card in self.cards
+                         if card._label_ack_pending and card.controller.record is not None]
+        if pending_cards:
+            normalized_code = str(code).strip()
+            exact_cards = [card for card in pending_cards
+                           if scanner_code_matches(normalized_code, card.controller.record.code_2d)]
+            if len(exact_cards) == 1:
+                card = exact_cards[0]
+            elif len(pending_cards) == 1:
+                card = pending_cards[0]
+            else:
+                self._live_trace(
+                    f"LABEL_SCAN_IGNORED station=A/B code={normalized_code!r} reason=ambiguous_pending")
+                self.scanner_status.setText({
+                    "中文": "A/B 均在等待标签码，继续扫码",
+                    "English": "A/B are waiting for labels; continue scanning",
+                    "Français": "A/B attendent une étiquette ; continuez à scanner",
+                }[self._language])
+                return
+
+            station = card.station
+            if not self.scanner_guards[station].accept(normalized_code):
+                self._live_trace(
+                    f"LABEL_SCAN_IGNORED station={station.value} code={normalized_code!r} reason=duplicate_or_empty")
+                self.scanner_status.setText({
+                    "中文": f"工位 {station.value} 标签不匹配，继续扫码",
+                    "English": f"Station {station.value} label mismatch; continue scanning",
+                    "Français": f"Étiquette du poste {station.value} incorrecte ; continuez à scanner",
+                }[self._language])
+                return
+
+            previous = card.code_input.text()
+            ok = card.scan(normalized_code, card.part_no.currentText())
+            if not ok or card._label_ack_pending:
+                card.code_input.setText(previous)
+                self._live_trace(
+                    f"LABEL_SCAN_IGNORED station={station.value} code={normalized_code!r} reason=mismatch")
+                self.scanner_status.setText({
+                    "中文": f"工位 {station.value} 标签不匹配，继续扫码",
+                    "English": f"Station {station.value} label mismatch; continue scanning",
+                    "Français": f"Étiquette du poste {station.value} incorrecte ; continuez à scanner",
+                }[self._language])
+                return
+            self.scanner_status.setText({
+                "中文": f"工位 {station.value} 标签已确认，可继续测试",
+                "English": f"Station {station.value} label acknowledged",
+                "Français": f"Étiquette du poste {station.value} confirmée",
+            }[self._language])
+            return
+
+        expected = {}
+        for card in self.cards:
+            record = card.controller.record
+            if card._label_ack_pending and record is not None:
+                expected[card.station] = record.code_2d
+            elif card.payload is not None:
+                expected[card.station] = card.payload.barcode_text
+        busy = {card.station for card in self.cards
+                if card.controller.phase not in (Phase.IDLE, Phase.WAIT_SCAN)
+                and not card._label_ack_pending}
         station = route_shared_scan(code, expected, busy)
         # Reject a locked station before consuming the scanner guard token;
         # otherwise the same physical scan would be treated as a duplicate
         # when the operator retries after completing calibration.
-        if self.calibration[station].locked:
+        card = self.cards[0 if station is StationId.A else 1]
+        label_ack = card._label_ack_pending
+        if self.calibration[station].locked and not label_ack:
             raise RuntimeError({"中文": "校准验证未完成", "English": "Calibration validation required", "Français": "Validation de calibration requise"}[self._language])
         if not self.scanner_guards[station].accept(code): raise ValueError({"中文": "扫码为空或重复", "English": "Empty or duplicate scan", "Français": "Scan vide ou dupliqué"}[self._language])
-        card = self.cards[0 if station is StationId.A else 1]; previous = card.code_input.text(); ok = card.scan(code, card.part_no.currentText())
-        if not ok or card.controller.phase is not Phase.READY or not card.controller.record or card.controller.record.code_2d != code.strip():
+        previous = card.code_input.text(); ok = card.scan(code, card.part_no.currentText())
+        if label_ack:
+            if not ok or card._label_ack_pending:
+                card.code_input.setText(previous)
+                raise RuntimeError("标签扫码确认未完成")
+            self.scanner_status.setText({"中文": f"工位 {station.value} 标签已确认，可继续测试", "English": f"Station {station.value} label acknowledged", "Français": f"Étiquette du poste {station.value} confirmée"}[self._language])
+            return
+        if (not ok or card.controller.phase is not Phase.READY
+                or not card.controller.record
+                or not scanner_code_matches(code, card.controller.record.code_2d)):
             card.code_input.setText(previous)
             raise RuntimeError({"中文": "扫码未进入就绪状态", "English": "Scan did not enter READY", "Français": "Le scan n'est pas passé à PRÊT"}[self._language])
         self.scanner_status.setText({"中文": f"已路由到工位 {station.value}", "English": f"Routed to station {station.value}", "Français": f"Routé vers le poste {station.value}"}[self._language])
@@ -2363,10 +2903,8 @@ class MainWindow(QMainWindow):
         if not (initial_state or completed_cycle):
             raise RuntimeError("当前测试尚未完成")
         calibration.begin_validation()
-        # Calibration is PLC-driven: the operator performs NG/OK validation
-        # before scanning the printed calibration label. Freeze the selected
-        # model/QR internally now, while keeping the QR display blank until
-        # the final label scan acknowledges the PLC.
+        # 校准标签不需要扫码确认。内部冻结型号/二维码供测试与追溯使用，
+        # 但保持页面二维码框为空；只有正常生产标签需要打印后扫码确认。
         if controller.record is None:
             payload = card.payload
             if payload is not None:
@@ -2435,7 +2973,22 @@ class MainWindow(QMainWindow):
         except Exception as serial_exc:
             self._live_trace(
                 f"CAL_SERIAL_ADVANCE_FAILED {type(serial_exc).__name__}: {serial_exc}")
-        # 现场规则：NG/OK 验证完成后立即清灯并启动倒计时，不再等待扫码。
+        # 校准标签不走正常标签的扫码确认事务。OK 校准标签打印确认后，
+        # 将单测 OK 留下的 LABELING 状态归档复位，允许后续正常周期启动。
+        if result == "OK" and phase is CalibrationPhase.COMPLETE:
+            card = self._card_for_station(station)
+            controller = card.controller
+            if controller.record is not None:
+                if controller.phase is Phase.LABELING:
+                    controller.phase = Phase.COMPLETE
+                if controller.phase is not Phase.COMPLETE:
+                    raise RuntimeError(
+                        f"校准周期尚未结束，不能释放工位：{controller.phase.value}")
+                cycle_id = controller.record.cycle_id
+                controller.reset()
+                self._live_trace(
+                    f"CAL_VALIDATION_RELEASED station={station.value} cycle={cycle_id}")
+        # NG 标签打印后继续等待 OK 样件；OK 标签打印确认后清灯并启动倒计时。
         if calibration.clear_pending:
             calibration.clear_after_resume()
         self._set_calibration_countdown(station, calibration.remaining_seconds)

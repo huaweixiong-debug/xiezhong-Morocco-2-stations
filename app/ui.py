@@ -62,15 +62,17 @@ def _install_crash_log() -> None:
     threading.excepthook = lambda args: _hook(args.exc_type, args.exc_value, args.exc_traceback)
 
 
-def launch_ui(*, b_live: bool = False, b_port: str = "COM6", b_slave: int = 1) -> int:
+def launch_ui(*, b_live: bool = False, b_port: str = "COM6", b_slave: int = 1,
+              live_all: bool = False, live_config: Path | None = None) -> int:
     if QApplication is None:
         raise RuntimeError("PySide6 未安装；请运行 pip install PySide6")
     _install_crash_log()
     app = QApplication.instance() or QApplication([])
     try:
-        window = MainWindow(b_live=b_live, b_port=b_port, b_slave=b_slave)
+        window = MainWindow(b_live=b_live, b_port=b_port, b_slave=b_slave,
+                            live_all=live_all, config_path=live_config)
     except Exception as exc:
-        message = f"B 硬件测试启动阻断：{type(exc).__name__}: {exc}"
+        message = f"实时硬件 UI 启动阻断：{type(exc).__name__}: {exc}"
         print(message)
         QMessageBox.critical(None, "B 硬件测试无法启动", message)
         return 2

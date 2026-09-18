@@ -39,9 +39,26 @@ def test_duplicate_cycle_label_is_idempotent():
 
 def test_ng_first_stage_does_not_run_second():
     station, _, _ = make_station(Result.NG)
-    station.scan("ABC")
+    station.scan("ABC", test_mode="single")
     station.test_first()
     assert station.phase is Phase.COMPLETE
+
+def test_dual_mode_waits_for_second_result_even_when_first_is_ng():
+    station, repo, _ = make_station(Result.NG)
+    station.scan("ABC", test_mode="dual")
+    station.test_first()
+    assert station.phase is Phase.WAIT_2
+    assert repo.records[station.record.cycle_id].first.result is Result.NG
+    station.test_second()
+    assert station.record.second.result is Result.NG
+    assert repo.records[station.record.cycle_id].second.result is Result.NG
+
+def test_external_plc_start_ateq_is_not_started_by_controller():
+    station, _, _ = make_station()
+    station.ateq.external_start = True
+    station.scan("ABC")
+    station.test_first()
+    assert station.ateq.start_count == 0
 
 def test_live_mode_is_not_write_enabled_by_default():
     assert not Settings(mode=RunMode.SIMULATE).can_write()

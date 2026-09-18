@@ -126,7 +126,7 @@ class StationController:
             if measurement.result is Result.OK:
                 self.phase = Phase.LABELING if self.record.test_mode == "single" else Phase.WAIT_2
             else:
-                self.phase = Phase.COMPLETE
+                self.phase = Phase.WAIT_2 if self.record.test_mode == "dual" else Phase.COMPLETE
             self._journal()
             return measurement
         except Exception as exc:
@@ -157,11 +157,10 @@ class StationController:
                   "timestamp": request.timestamp, "state": "TEST_INTENT"}
         self.ateq_intents.append(intent)
         self._journal()
-        # The PLC M16.x bit is only the UI trigger.  The UI must explicitly
-        # start the tester over Modbus before waiting for StepCode 4/5/6;
-        # otherwise a real ATEQ can remain idle until the cycle timeout.
+        # Real ATEQ cycles are started by the PLC hardware.  The live adapter
+        # is monitor-only; simulation adapters may still mirror a start action.
         start_test = getattr(self.ateq, "start_test", None)
-        if callable(start_test):
+        if callable(start_test) and not getattr(self.ateq, "external_start", False):
             start_test()
         response = self.ateq.run(request)
         if not isinstance(response, AteqResponse):
@@ -250,8 +249,9 @@ class StationController:
         self.print_state, self.print_job_id, self.print_receipt = PrintState.NONE, "", ""
         self.db_row_id, self.db_intents, self.db_commits = None, [], []
 
-    def resolve_recovery(self, reason: str = "人工确认") -> None:
-        self.security.require("recovery_resolve")
+    def resolve_recovery(self, reason: str = "人工确认", *, require_permission: bool = True) -> None:
+        if require_permission:
+            self.security.require("recovery_resolve")
         if not self.recovery_required:
             return
         original = self.journal.recover() if self.journal else None

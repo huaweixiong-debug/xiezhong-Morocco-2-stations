@@ -12,8 +12,9 @@ This module keeps that contract:
   reads (二维码/序列号/产品型号/作业员/客户产品号/正压值/负压值/打印路径).
 * label_data.txt is additionally written as a single-row summary of the
   cycle for human review; no template depends on it.
-* The template is selected by <part_no>-<station>.btw, matching the
-  file names observed in D:\\data.
+* Explicit per-model A/B template selections may use any ordinary .btw
+  basename in D:\\data. Legacy records without an explicit selection still
+  resolve <part_no>-<station>.btw.
 * Printing is explicit and single-shot: no implicit retry, a failed
   print returns a rejected receipt for the operator to handle.
 """
@@ -45,6 +46,13 @@ FIELD_FILES = {
     "negative": "负压值{station}.txt",
     "template": "打印路径{station}.txt",
 }
+
+CALIBRATION_TEMPLATE_PREFIXES = ("cal_ng_", "cal_ok_", "calibration_")
+
+
+def is_calibration_template(path: str | Path) -> bool:
+    """Keep dedicated calibration labels out of normal production templates."""
+    return Path(path).stem.casefold().startswith(CALIBRATION_TEMPLATE_PREFIXES)
 
 
 def record_to_row(record: TraceRecord) -> list[str]:
@@ -139,6 +147,26 @@ def resolve_template(template_dir: Path, part_no: str, station: StationId) -> Pa
         f"未找到模板 {part_no}-{station.value}.btw; 模板目录现有: {available}")
 
 
+def _validate_production_template(template_dir: Path, candidate: str | Path) -> Path:
+    """Require a real production .btw under Data, without constraining its name."""
+    root = Path(template_dir).resolve()
+    path = Path(candidate)
+    if not path.is_absolute():
+        path = root / path
+    path = path.resolve(strict=True)
+    if not path.is_file():
+        raise FileNotFoundError(f"打印模板不是文件: {path}")
+    if path.suffix.casefold() != ".btw":
+        raise ValueError(f"生产打印模板必须是 .btw 文件: {path}")
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"生产打印模板必须位于 Data 文件夹内: {path}") from exc
+    if is_calibration_template(path):
+        raise ValueError(f"校准模板不能作为普通生产模板: {path.name}")
+    return path
+
+
 class BarTenderCmdPrinter:
     """Single-shot BarTender printer driven through bartend.exe."""
 
@@ -160,12 +188,10 @@ class BarTenderCmdPrinter:
         with _PRINT_TRANSACTION_LOCK, self._lock:
             if record.cycle_id in self.intents:
                 return PrintReceipt(True, job_id, f"receipt-{record.cycle_id}")
-            self.intents.add(record.cycle_id)
             template = Path(record.template_path) if record.template_path else resolve_template(
                 self.template_dir, record.part_no or "", record.station)
-            expected_suffix = f"-{record.station.value}.btw"
-            if not template.name.lower().endswith(expected_suffix.lower()) or not template.is_file():
-                raise FileNotFoundError(f"冻结模板无效或工位不匹配: {template}")
+            template = _validate_production_template(self.template_dir, template)
+            self.intents.add(record.cycle_id)
             write_field_files(record, self.template_dir, template)
             write_label_data(record, self.data_file)
             command = bartend_command(self.executable, template, self.close_after)

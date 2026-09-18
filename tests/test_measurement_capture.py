@@ -89,7 +89,10 @@ def test_pressure_from_step6_and_leak_from_terminal_frame():
     ateq.connect()
     request = AteqRequest("B", "cycle-x", "1", 99, "2026-09-12T00:00:00+00:00")
     ateq.program = "1"
+    stepcodes = []
+    ateq.stepcode_callback = stepcodes.append
     response = ateq.run(request)
+    assert stepcodes == [6, 65525]
     assert response.measurement.pressure == 50.0
     assert response.measurement.leakage == 3.0
     assert response.measurement.result is Result.NG  # status bit 0x0006
@@ -116,6 +119,25 @@ def test_pressure_missing_step6_fails_closed():
         assert "StepCode=6" in str(exc)
     else:
         raise AssertionError("expected fail-closed without a step-6 snapshot")
+
+
+def test_field_status_8020_is_decoded_as_ng():
+    """The field F620 NG sample uses terminal status 0x8020."""
+    step6 = _registers(step=6, status=0x0000, fifo=0x0007,
+                       pressure_raw=0x0000C350, leak_raw=0,
+                       p_unit=11000, l_unit=12000)
+    terminal = _registers(step=65525, status=0x8020, fifo=0x0008,
+                          pressure_raw=0, leak_raw=0x00000BB8,
+                          p_unit=11000, l_unit=12000)
+    frames = [_build_frame(step6), _build_frame(step6), _build_frame(terminal)]
+    ateq = SerialAteq("COMX", "B", slave=1, cycle_timeout_s=5,
+                      serial_factory=lambda **kwargs: FrameSerial(frames))
+    ateq.connect()
+    ateq.program = "1"
+    request = AteqRequest("B", "cycle-field-ng", "1", 101,
+                          "2026-09-18T00:00:00+00:00")
+    response = ateq.run(request)
+    assert response.measurement.result is Result.NG
 
 
 def test_measurement_line_contains_date_time():
