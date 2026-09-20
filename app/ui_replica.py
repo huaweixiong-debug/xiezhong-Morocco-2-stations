@@ -2983,6 +2983,17 @@ class MainWindow(QMainWindow):
         self._live_trace(f"CAL_PRINT_ACCEPTED station={station.value} result={result} job={getattr(receipt, 'job_id', '')}")
         self._enable_scanner_after_print(station, getattr(receipt, "job_id", ""))
         phase = calibration.sample(result)
+        # A validated calibration sample acknowledges the corresponding
+        # station to PLC without requiring a barcode scan.  M0.1/M0.0 is
+        # pulsed only after the expected NG/OK result and print confirmation.
+        card = self._card_for_station(station)
+        record = card.controller.record
+        if record is not None:
+            card._send_scan_ok(record.code_2d)
+            self._live_trace(
+                f"CAL_PLC_SIGNAL station={station.value} point="
+                f"M{POINTS['scan_ok'][station][0]}.{POINTS['scan_ok'][station][1]} "
+                f"result={result}")
         # 现场规则：样件验证通过才递增校准流水号（C001→C002→...连续）。
         try:
             record = self._card_for_station(station).controller.record
