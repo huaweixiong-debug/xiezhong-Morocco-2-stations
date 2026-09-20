@@ -18,6 +18,10 @@ class ScannerGuard:
         self._last, self._at = value, now
         return True
 
+    def reset(self) -> None:
+        """Forget the last code so a station reset permits a fresh scan."""
+        self._last, self._at = "", 0.0
+
 class ScannerFramer:
     def __init__(self, terminator: bytes = b"\r") -> None:
         self.terminator, self.buffer = terminator, bytearray()
@@ -27,6 +31,9 @@ class ScannerFramer:
             raw, self.buffer = self.buffer.split(self.terminator, 1)
             if raw: result.append(raw.decode("utf-8", errors="replace"))
         return result
+
+    def reset(self) -> None:
+        self.buffer.clear()
 
 
 class SerialScanner:

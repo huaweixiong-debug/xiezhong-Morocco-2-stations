@@ -798,6 +798,10 @@ class StationPanel(QFrame):
         # a later production cycle.
         self._label_ack_pending = False
         try:
+            window = self.window()
+            reset_scanner = getattr(window, "reset_station_scanner", None)
+            if reset_scanner is not None:
+                reset_scanner(self.station)
             self._clear_scan_ok("reset")
             if self.controller.recovery_required:
                 # Reset is the operator's explicit escape hatch from a
@@ -1721,6 +1725,7 @@ class MainWindow(QMainWindow):
         scanner = self.shared_scanner
         if scanner is None:
             self._set_shared_scanner_indicator(False)
+
             return
         if not self._scan_enabled:
             self._set_shared_scanner_indicator(scanner.connected())
@@ -1757,6 +1762,16 @@ class MainWindow(QMainWindow):
             }[self._language])
         elif not scanner.connected():
             self._set_shared_scanner_indicator(False)
+
+    def reset_station_scanner(self, station: StationId) -> None:
+        """Reset only the selected station's scanner guard and frame buffer."""
+        guard = self.scanner_guards.get(station)
+        if guard is not None:
+            guard.reset()
+        framer = self.scanner_framers.get(station)
+        if framer is not None:
+            framer.reset()
+        self._live_trace(f"SCANNER_RESET station={station.value}")
 
     def toggle_shared_scanner(self):
         """Send LON/LOFF to the shared scanner without changing test state."""
