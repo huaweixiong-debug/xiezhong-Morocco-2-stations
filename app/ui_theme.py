@@ -295,6 +295,9 @@ def stylesheet() -> str:
     QPushButton:disabled {{ color: {p.muted}; background: {p.disabled}; border-color: {p.border}; }}
     QPushButton[primary="true"] {{ background: {p.accent}; color: white; border-color: {p.accent}; font-weight: 600; }}
     QPushButton[primary="true"]:disabled {{ color: {p.muted}; background: {p.disabled}; border-color: {p.border}; font-weight: 400; }}
+    QPushButton[validationComplete="true"] {{ background: {p.ok}; color: white; border: 2px solid {p.ok}; border-radius: {m.control_radius + 2}px; font-weight: 700; letter-spacing: 0.2px; }}
+    QPushButton[validationComplete="true"]:disabled {{ background: {p.ok}; color: white; border: 2px solid {p.ok}; font-weight: 700; }}
+    QPushButton[validationComplete="true"]:hover {{ background: #16834a; border-color: #16834a; }}
     QPushButton[destructive="true"] {{ color: {p.ng}; }}
     QTableWidget {{ background: {p.surface}; alternate-background-color: {p.row_alt}; border: 1px solid {p.border}; border-radius: {m.control_radius + 2}px; gridline-color: #e8edf4; font-size: {m.label_text}px; }}
     QTableWidget::item {{ padding: 0 8px; }}

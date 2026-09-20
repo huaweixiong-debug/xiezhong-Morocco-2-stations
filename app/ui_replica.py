@@ -533,7 +533,7 @@ class StationPanel(QFrame):
                      "English": f"Station {self.station.value}: validation complete; scan to continue",
                      "Français": f"Poste {self.station.value} : validation terminée, scannez pour continuer"}[language],
                     "warn",
-                    {"中文": "验证完成\n请扫码", "English": "Validation\nComplete", "Français": "Validation\nterminée"}[language])
+                    {"中文": "✓ 验证完成\n请扫码", "English": "✓ Validation\nComplete", "Français": "✓ Validation\nterminée"}[language])
         if calibration.validation_started and calibration.phase is CalibrationPhase.WAIT_NG:
             return ({"中文": f"工位 {self.station.value}：请放 NG 首件",
                      "English": f"Station {self.station.value}: place NG first piece",
@@ -960,6 +960,8 @@ class StationPanel(QFrame):
                 indicator_state = "ng" if value else "info"
             elif signal in ("ng_sample", "ok_sample"):
                 indicator_state = "ok" if value else "info"
+            elif signal == "start_validation" and calibration is not None and calibration.clear_pending:
+                indicator_state = "ok"
             else:
                 indicator_state = "ok" if value else "info"
             tile = self.indicator_tiles.get(signal)
@@ -979,6 +981,9 @@ class StationPanel(QFrame):
                              terminal_or_initial and not calibration.clear_pending)
             self.start_validation_button.setEnabled(can_start)
             self.start_validation_button.setText(button_caption)
+            self.start_validation_button.setProperty("validationComplete", bool(calibration and calibration.clear_pending))
+            self.start_validation_button.style().unpolish(self.start_validation_button)
+            self.start_validation_button.style().polish(self.start_validation_button)
             self.start_validation_button.setToolTip(notice)
         if hasattr(self, "cancel_calibration_button"):
             is_admin = getattr(self.window(), "security", None) is not None and \
