@@ -338,6 +338,23 @@ class StationPanel(QFrame):
         self._product_changed()
 
     def _mode_changed(self, dual):
+        # Freeze the mode when a production/calibration cycle has started.
+        # Changing the visual toggle after validation starts must never make
+        # a single-test calibration appear to be a dual-test one.
+        calibration = self._calibration()
+        frozen_mode = (calibration.test_mode if calibration is not None
+                       and calibration.validation_started else
+                       (self.controller.record.test_mode if self.controller.record else None))
+        if frozen_mode in ("single", "dual") and dual != (frozen_mode == "dual"):
+            self.mode_button.blockSignals(True)
+            self.mode_button.setChecked(frozen_mode == "dual")
+            self.mode_button.blockSignals(False)
+            self.mode_button.setText(
+                f"{'Dual Test / 双测' if frozen_mode == 'dual' else 'Single Test / 单测'} {self.station.value}")
+            trace = getattr(self.window(), "_live_trace", None)
+            if trace is not None:
+                trace(f"TEST_MODE_CHANGE_REJECTED station={self.station.value} frozen={frozen_mode}")
+            return
         self.mode_button.setText(f"{'Dual Test / 双测' if dual else 'Single Test / 单测'} {self.station.value}")
         self._product_changed()
 
@@ -2937,6 +2954,7 @@ class MainWindow(QMainWindow):
         if not (initial_state or completed_cycle):
             raise RuntimeError("当前测试尚未完成")
         calibration.begin_validation("dual" if card.mode_button.isChecked() else "single")
+        self._live_trace(f"CAL_MODE_FROZEN station={station.value} mode={calibration.test_mode}")
         # 校准标签不需要扫码确认。内部冻结型号/二维码供测试与追溯使用，
         # 但保持页面二维码框为空；只有正常生产标签需要打印后扫码确认。
         if controller.record is None:
