@@ -2210,6 +2210,8 @@ class MainWindow(QMainWindow):
                 template_path_a=template_a,
                 template_path_b=template_b,
                 ateq_program=program,
+                station_code_a=self.global_station_a.text().strip() or "5",
+                station_code_b=self.global_station_b.text().strip() or "6",
             ))
         return configs
 
@@ -2730,11 +2732,23 @@ class MainWindow(QMainWindow):
     def _save_global_settings(self):
         try:
             period_seconds = self._calibration_period_seconds()
+            station_a = self.global_station_a.text().strip() or "5"
+            station_b = self.global_station_b.text().strip() or "6"
             self.global_settings.save({
-                "工位号A": self.global_station_a.text().strip() or "5",
-                "工位号B": self.global_station_b.text().strip() or "6",
+                "工位号A": station_a,
+                "工位号B": station_b,
                 "校准周期": self.cal_period.time().toString("HH:mm:ss"),
             })
+            # 标签生成读取 日期设置.ini 中的型号级工位号；同步更新，
+            # 防止全局设置与型号配置分叉，或下次保存型号时回退到默认值。
+            configs = []
+            for part in self.model_settings.list_models():
+                config = self.model_settings.load(part)
+                config.station_code_a = station_a
+                config.station_code_b = station_b
+                configs.append(config)
+            if configs:
+                self.model_settings.save_all(configs)
             for calibration in self.calibration.values():
                 calibration.set_period(period_seconds)
             self.settings_status.setText({"中文": "全局设置已保存", "English": "Global settings saved", "Français": "Réglages globaux enregistrés"}[self._language])
