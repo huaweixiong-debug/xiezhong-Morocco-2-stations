@@ -43,15 +43,14 @@ def test_ng_first_stage_does_not_run_second():
     station.test_first()
     assert station.phase is Phase.COMPLETE
 
-def test_dual_mode_waits_for_second_result_even_when_first_is_ng():
+def test_dual_mode_ng_first_stage_is_terminal():
     station, repo, _ = make_station(Result.NG)
     station.scan("ABC", test_mode="dual")
     station.test_first()
-    assert station.phase is Phase.WAIT_2
+    assert station.phase is Phase.COMPLETE
     assert repo.records[station.record.cycle_id].first.result is Result.NG
-    station.test_second()
-    assert station.record.second.result is Result.NG
-    assert repo.records[station.record.cycle_id].second.result is Result.NG
+    assert station.record.second is None
+    assert repo.records[station.record.cycle_id].second is None
 
 def test_external_plc_start_ateq_is_not_started_by_controller():
     station, _, _ = make_station()

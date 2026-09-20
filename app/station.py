@@ -126,7 +126,10 @@ class StationController:
             if measurement.result is Result.OK:
                 self.phase = Phase.LABELING if self.record.test_mode == "single" else Phase.WAIT_2
             else:
-                self.phase = Phase.WAIT_2 if self.record.test_mode == "dual" else Phase.COMPLETE
+                # A negative first test is terminal in both modes.  Dual mode
+                # only adds the positive-pressure test after a passing
+                # negative-pressure stage; it must never retest an NG part.
+                self.phase = Phase.COMPLETE
             self._journal()
             return measurement
         except Exception as exc:
