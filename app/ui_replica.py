@@ -158,6 +158,7 @@ class StationPanel(QFrame):
         self.test_finished.connect(self._finish_test)
         self.payload = None
         self._label_ack_pending = False
+        self._scan_pulse_token = 0
         self._error_key = None
         self.controller = StationController(station, repository, printer, ateq or FakeAteq(), journal,
             safe_stop=plc, license_status=security.license_status, security=security)
@@ -437,7 +438,7 @@ class StationPanel(QFrame):
         byte, bit = POINTS[signal][self.station]; return self.plc.read_bit(byte, bit)
 
     def _send_scan_ok(self, code: str) -> None:
-        """Pulse only this card's confirmed PLC scan-OK bit after a match."""
+        """Pulse this card's confirmed PLC scan-OK bit for exactly 2 seconds."""
         byte, bit = POINTS["scan_ok"][self.station]
         # A PLC that does not acknowledge/clear the handshake immediately can
         # leave the previous cycle's bit high.  Force a low edge before the
@@ -460,6 +461,15 @@ class StationPanel(QFrame):
         if trace is not None:
             trace(f"SCAN_PLC_SIGNAL station={self.station.value} "
                   f"point=M{byte}.{bit} code={str(code).strip()!r}")
+        self._scan_pulse_token += 1
+        pulse_token = self._scan_pulse_token
+        QTimer.singleShot(2000, lambda: self._finish_scan_pulse(pulse_token))
+
+    def _finish_scan_pulse(self, pulse_token: int) -> None:
+        """Drop a scan-OK pulse after 2 s, unless a newer pulse superseded it."""
+        if pulse_token != self._scan_pulse_token:
+            return
+        self._clear_scan_ok("pulse_2s_elapsed")
 
     def eventFilter(self, obj, event):
         """Trace clicks that land on the disabled Start Validation button.
