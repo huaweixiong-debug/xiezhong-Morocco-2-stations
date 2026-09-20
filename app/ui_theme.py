@@ -290,6 +290,7 @@ def stylesheet() -> str:
     QPushButton[calibrationStart="true"] {{ padding: 0 4px; }}
     QPushButton[compact="true"] {{ min-height: 24px; max-height: 32px; padding: 0 10px; font-size: {m.label_text}px; }}
     QPushButton[manualToggle="true"] {{ color: {p.accent}; border-color: #cbdcff; font-weight: 600; }}
+    QPushButton[modeLocked="true"] {{ color: {p.muted}; background: {p.disabled}; border-color: {p.border}; font-weight: 600; }}
     QPushButton:hover {{ border-color: {p.accent}; background: {p.accent_soft}; }}
     QPushButton:pressed, QPushButton:checked {{ background: {p.accent}; color: white; border-color: {p.accent}; }}
     QPushButton:disabled {{ color: {p.muted}; background: {p.disabled}; border-color: {p.border}; }}

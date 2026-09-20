@@ -985,6 +985,15 @@ class StationPanel(QFrame):
             self.start_validation_button.style().unpolish(self.start_validation_button)
             self.start_validation_button.style().polish(self.start_validation_button)
             self.start_validation_button.setToolTip(notice)
+        # Once validation starts, the selected single/dual mode is part of the
+        # frozen validation contract.  Disable the toggle visibly so the
+        # operator cannot change the mode while the NG/OK sequence is active.
+        if hasattr(self, "mode_button"):
+            mode_locked = bool(calibration and calibration.validation_started)
+            self.mode_button.setEnabled(not mode_locked)
+            self.mode_button.setProperty("modeLocked", mode_locked)
+            self.mode_button.style().unpolish(self.mode_button)
+            self.mode_button.style().polish(self.mode_button)
         if hasattr(self, "cancel_calibration_button"):
             is_admin = getattr(self.window(), "security", None) is not None and \
                 self.window().security.role.value == "admin"
