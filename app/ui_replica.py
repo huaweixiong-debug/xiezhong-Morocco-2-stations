@@ -2771,6 +2771,9 @@ class MainWindow(QMainWindow):
                 "English": f"Station {station.value} label acknowledged",
                 "Français": f"Étiquette du poste {station.value} confirmée",
             }[self._language])
+            if any(other._label_ack_pending and other.controller.record is not None
+                   for other in self.cards):
+                self._enable_scanner_after_print(station, "multi_station_pending")
             return
 
         expected = {}
@@ -2798,6 +2801,9 @@ class MainWindow(QMainWindow):
                 card.code_input.setText(previous)
                 raise RuntimeError("标签扫码确认未完成")
             self.scanner_status.setText({"中文": f"工位 {station.value} 标签已确认，可继续测试", "English": f"Station {station.value} label acknowledged", "Français": f"Étiquette du poste {station.value} confirmée"}[self._language])
+            if any(other._label_ack_pending and other.controller.record is not None
+                   for other in self.cards):
+                self._enable_scanner_after_print(station, "multi_station_pending")
             return
         if (not ok or card.controller.phase is not Phase.READY
                 or not card.controller.record
