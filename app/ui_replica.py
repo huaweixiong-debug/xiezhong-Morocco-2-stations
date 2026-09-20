@@ -1480,6 +1480,10 @@ class MainWindow(QMainWindow):
         payload = card.payload
         if payload is None:
             return False
+        # The NG validation label may have pulsed the station scan bit.  Drop
+        # that edge before the independent OK validation cycle starts so the
+        # PLC cannot mistake a leftover high level for the OK result.
+        card._clear_scan_ok("calibration_ok_cycle_start")
         if card.controller.record is not None or card.controller.phase is Phase.FAULT:
             try:
                 card.controller.reset()
@@ -2983,6 +2987,10 @@ class MainWindow(QMainWindow):
             raise RuntimeError("当前测试尚未完成")
         calibration.begin_validation("dual" if card.mode_button.isChecked() else "single")
         self._live_trace(f"CAL_MODE_FROZEN station={station.value} mode={calibration.test_mode}")
+        # A previous production/validation scan must never satisfy the PLC
+        # during the new NG/OK validation sequence.  Only the printed-label
+        # acknowledgement path is allowed to raise this bit again.
+        card._clear_scan_ok("calibration_start")
         # 校准标签不需要扫码确认。内部冻结型号/二维码供测试与追溯使用，
         # 但保持页面二维码框为空；只有正常生产标签需要打印后扫码确认。
         if controller.record is None:
