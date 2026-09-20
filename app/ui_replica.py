@@ -737,6 +737,13 @@ class StationPanel(QFrame):
                       f"pressure={measurement.pressure}{measurement.pressure_unit} "
                       f"leakage={measurement.leakage}{measurement.leakage_unit} "
                       f"raw={measurement.raw_frame.hex()}")
+            # Dual validation requires both negative-OK and positive-OK.
+            if (calibration.test_mode == "dual" and record.first is measurement
+                    and measurement.result.value == "OK"
+                    and self.controller.phase is Phase.WAIT_2):
+                if trace is not None:
+                    trace(f"CAL_DUAL_OK_NEGATIVE_PASSED station={self.station.value}")
+                return
             self.window().on_calibration_sample(measurement.result.value, self.station)
 
     def label(self):
@@ -1403,7 +1410,7 @@ class MainWindow(QMainWindow):
         selection = StationSelection(
             card.station, cal_payload.product_id,
             card.staff.currentText().strip() or "Operator",
-            "single", cal_payload.serial_no, cal_payload.barcode_text,
+            calibration.test_mode, cal_payload.serial_no, cal_payload.barcode_text,
             cal_payload.customer_model, str(cal_payload.ateq_program),
             str(cal_payload.template_path))
         controller.scan_selection(selection)
@@ -1443,7 +1450,7 @@ class MainWindow(QMainWindow):
             payload.product_id, card.station)
         selection = StationSelection(
             card.station, cal_payload.product_id, card.staff.currentText().strip() or "Operator",
-            "single", cal_payload.serial_no, cal_payload.barcode_text, cal_payload.customer_model,
+            calibration.test_mode, cal_payload.serial_no, cal_payload.barcode_text, cal_payload.customer_model,
             str(cal_payload.ateq_program), str(cal_payload.template_path))
         card.controller.scan_selection(selection)
         card.code_input.clear()
@@ -2902,7 +2909,7 @@ class MainWindow(QMainWindow):
         completed_cycle = controller.record is not None and controller.phase is Phase.COMPLETE
         if not (initial_state or completed_cycle):
             raise RuntimeError("当前测试尚未完成")
-        calibration.begin_validation()
+        calibration.begin_validation("dual" if card.mode_button.isChecked() else "single")
         # 校准标签不需要扫码确认。内部冻结型号/二维码供测试与追溯使用，
         # 但保持页面二维码框为空；只有正常生产标签需要打印后扫码确认。
         if controller.record is None:
@@ -2914,7 +2921,7 @@ class MainWindow(QMainWindow):
                 selection = StationSelection(
                     station, cal_payload.product_id,
                     card.staff.currentText().strip() or "Operator",
-                    "single", cal_payload.serial_no, cal_payload.barcode_text,
+                    calibration.test_mode, cal_payload.serial_no, cal_payload.barcode_text,
                     cal_payload.customer_model, str(cal_payload.ateq_program),
                     str(cal_payload.template_path))
                 controller.scan_selection(selection)

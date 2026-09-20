@@ -20,6 +20,7 @@ class Calibration:
         self.required_samples = required_samples
         self.ng_count = self.ok_count = 0
         self.sample_demand = "NG"
+        self.test_mode = "single"
         # ``countdown`` remains the NG/OK sample-count compatibility field.
         # The production interval uses a separate monotonic timer so a
         # two-hour setting is not confused with the two validation samples.
@@ -85,12 +86,15 @@ class Calibration:
             return True
         return False
 
-    def begin_validation(self) -> None:
+    def begin_validation(self, test_mode: str = "single") -> None:
         """Arm the NG -> OK validation before production or after a cycle."""
         if not self.due:
             raise RuntimeError("当前未到校准周期")
         if self._clear_pending:
             raise RuntimeError("校准已完成，等待下一周期清除状态")
+        if test_mode not in ("single", "dual"):
+            raise ValueError("校准检测模式必须是 single 或 dual")
+        self.test_mode = test_mode
         self.phase = CalibrationPhase.WAIT_NG
         self.ng_count = self.ok_count = 0
         self.sample_demand = "NG"
