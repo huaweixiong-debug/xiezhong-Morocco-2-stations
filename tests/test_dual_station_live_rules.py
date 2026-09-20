@@ -387,6 +387,20 @@ def test_advance_serial_increments_and_resets_daily(tmp_path):
     assert engine.advance_serial("E122015400", StationId.A, day1) == "0083"
 
 
+def test_shared_counter_path_isolated_per_product(tmp_path):
+    engine = make_engine(tmp_path)
+    ini = tmp_path / "products.ini"
+    original = ini.read_text(encoding="utf-8")
+    ini.write_text(original + original.replace("[E122015400]", "[SECOND]").replace(
+        "E122015400", "SECOND"), encoding="utf-8")
+    engine = BarcodeRuleEngine(ini, tmp_path / "dates.ini", tmp_path / "out")
+    day = datetime(2026, 9, 18, 8, 0)
+    assert engine.advance_serial("E122015400", StationId.B, day) == "0057"
+    assert engine.advance_serial("SECOND", StationId.B, day) == "0057"
+    assert engine.advance_serial("E122015400", StationId.B, day) == "0058"
+    assert engine.advance_serial("SECOND", StationId.B, day) == "0058"
+
+
 def test_advance_serial_never_rewinds_behind_frozen_cycle(tmp_path):
     from datetime import datetime as _dt
     engine = make_engine(tmp_path)

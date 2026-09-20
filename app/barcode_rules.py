@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -294,12 +295,32 @@ class BarcodeRuleEngine:
         self.dates = DateCodeCatalog.from_file(date_ini)
         self.output_dir = Path(output_dir)
 
+    def _serial_path(self, product: str, station: StationId) -> Path:
+        """Return a per-product counter when several models share one legacy path."""
+        rule = self.products.rule_for(product.strip())
+        base = Path(rule.serial_files[station])
+        users = [item.product_id for item in self.products.rules.values()
+                 if Path(item.serial_files[station]) == base]
+        if len(users) <= 1:
+            return base
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", product.strip())
+        return base.with_name(f"{base.stem}-{safe}{base.suffix}")
+
+    def _read_product_serial(self, product: str, station: StationId, when: datetime) -> str:
+        path = self._serial_path(product, station)
+        if path.is_file():
+            return read_serial(path)
+        # One-time migration seed from the old shared station counter.
+        legacy = self.products.rule_for(product.strip()).serial_files[station]
+        return read_serial(legacy)
+
     def generate(self, product: str, station: StationId, when: datetime | None = None,
                  serial_override: str | None = None) -> LabelPayload:
         if not isinstance(station, StationId):
             raise BarcodeInputError(f"工位必须为 StationId: {station!r}")
         rule = self.products.rule_for(product.strip())
-        serial = serial_override if serial_override is not None else read_serial(rule.serial_files[station])
+        serial = serial_override if serial_override is not None else self._read_product_serial(
+            product, station, when or datetime.now())
         date_code = self.dates.date_code(rule.date_scheme, when or datetime.now())
         barcode = _apply_rule(rule.barcode_rule, {
             "客户型号": rule.customer_model,
@@ -336,7 +357,7 @@ class BarcodeRuleEngine:
         if not isinstance(station, StationId):
             raise BarcodeInputError(f"工位必须为 StationId: {station!r}")
         rule = self.products.rule_for(product.strip())
-        serial_path = Path(rule.serial_files[station])
+        serial_path = self._serial_path(product, station)
         expected = None
         if consumed_serial is not None:
             raw_expected = str(consumed_serial).strip()
@@ -344,7 +365,10 @@ class BarcodeRuleEngine:
                 raise BarcodeInputError(f"已消费流水号无效: {consumed_serial!r}")
             expected = int(raw_expected)
         with _serial_file_lock(serial_path):
-            current = int(read_serial(serial_path))
+            if serial_path.is_file():
+                current = int(read_serial(serial_path))
+            else:
+                current = int(read_serial(rule.serial_files[station]))
             today = (when or datetime.now()).strftime("%Y%m%d")
             day_path = serial_path.with_name(f"{serial_path.stem}日期.txt")
             last_day = (day_path.read_text(encoding="utf-8-sig").strip()
