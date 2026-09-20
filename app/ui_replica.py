@@ -194,7 +194,9 @@ class StationPanel(QFrame):
         self.code_input = QLineEdit(); self.code_input.setObjectName(f"main_code_{station.value}"); self.code_input.setReadOnly(True); self.code = self.code_input; top.addWidget(QLabel(f"2D Code {station.value}"), 0, 1); top.addWidget(self.code_input, 1, 1)
         self.total_today = QSpinBox(); self.total_today.setObjectName(f"total_today_{station.value}"); self.total_today.setReadOnly(True); self.total_today.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons); self.total_today.setFixedWidth(72); top.addWidget(QLabel(f"Total Today {station.value}"), 0, 2); top.addWidget(self.total_today, 1, 2)
         self.ok_today = QSpinBox(); self.ok_today.setObjectName(f"ok_today_{station.value}"); self.ok_today.setReadOnly(True); self.ok_today.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons); self.ok_today.setFixedWidth(72); top.addWidget(QLabel(f"OK Today {station.value}"), 0, 3); top.addWidget(self.ok_today, 1, 3)
-        self.ateq_no = QLineEdit("SIM"); self.ateq_no.setObjectName(f"ateq_no_{station.value}"); self.ateq_no.setReadOnly(True); self.ateq_no.setMaxLength(3); self.ateq_no.setFixedWidth(64); top.addWidget(QLabel(f"ATEQ No. {station.value}"), 0, 4); top.addWidget(self.ateq_no, 1, 4)
+        self.ateq_no = QLineEdit("SIM"); self.ateq_no.setObjectName(f"ateq_no_{station.value}"); self.ateq_no.setReadOnly(True); self.ateq_no.setMaxLength(3); self.ateq_no.setFixedWidth(64)
+        ateq_label = QLabel("ATEQ No."); ateq_label.setWordWrap(False); ateq_label.setMinimumWidth(76)
+        top.addWidget(ateq_label, 0, 4); top.addWidget(self.ateq_no, 1, 4)
         self.part_no = QComboBox(); self.part_no.setObjectName(f"part_no_{station.value}"); self.part_no.currentTextChanged.connect(self._product_changed); top.addWidget(QLabel(f"Part No. {station.value}"), 0, 5); top.addWidget(self.part_no, 1, 5)
         self.staff = QComboBox(); self.staff.setObjectName(f"staff_{station.value}"); self.staff.currentTextChanged.connect(self._product_changed); top.addWidget(QLabel(f"Staff {station.value}"), 0, 6); top.addWidget(self.staff, 1, 6)
         for column in range(7):
