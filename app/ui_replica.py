@@ -580,12 +580,17 @@ class StationPanel(QFrame):
                     return False
                 self._send_scan_ok(normalized_code)
                 self._label_ack_pending = False
-                # Only normal production labels enter this acknowledgement
-                # path. Calibration labels never set _label_ack_pending.
                 if self.controller.phase is Phase.LABELING:
                     self.controller.phase = Phase.COMPLETE
                 if self.controller.phase is Phase.COMPLETE:
                     self.controller.reset()
+                # A calibration OK result is not complete until its printed
+                # label has been scanned and the PLC handshake succeeded.
+                if calibration is not None and calibration.clear_pending:
+                    calibration.clear_after_resume()
+                    trace = getattr(self.window(), "_live_trace", None)
+                    if trace is not None:
+                        trace(f"CAL_VALIDATION_RELEASED_AFTER_SCAN station={self.station.value}")
                 self.code_input.setText(code.strip())
                 self._error_key = None
                 self.refresh(); self.changed_callback()
@@ -2569,6 +2574,7 @@ class MainWindow(QMainWindow):
                 "period_seconds": cal.period_seconds,
                 "clear_pending": cal.clear_pending,
                 "sample_demand": cal.sample_demand,
+                "test_mode": cal.test_mode,
                 "audit_events": [dict(event) for event in cal.audit_events],
             }
         signature = repr(sorted(snapshot.items()))
@@ -2611,10 +2617,8 @@ class MainWindow(QMainWindow):
                 cal.ok_count = int(state["ok_count"])
                 cal.remaining_seconds = max(0.0, float(state["remaining_seconds"]))
                 cal._clear_pending = bool(state["clear_pending"])
-                if cal._clear_pending:
-                    # 现场规则：验证完成后无需扫码，恢复即清灯并启动倒计时。
-                    cal.clear_after_resume()
                 cal.sample_demand = str(state.get("sample_demand", ""))
+                cal.test_mode = str(state.get("test_mode", "single"))
                 cal._last_tick = time.monotonic()
             except (KeyError, ValueError, TypeError):
                 continue
@@ -3009,24 +3013,9 @@ class MainWindow(QMainWindow):
         except Exception as serial_exc:
             self._live_trace(
                 f"CAL_SERIAL_ADVANCE_FAILED {type(serial_exc).__name__}: {serial_exc}")
-        # 校准标签不走正常标签的扫码确认事务。OK 校准标签打印确认后，
-        # 将单测 OK 留下的 LABELING 状态归档复位，允许后续正常周期启动。
-        if result == "OK" and phase is CalibrationPhase.COMPLETE:
-            card = self._card_for_station(station)
-            controller = card.controller
-            if controller.record is not None:
-                if controller.phase is Phase.LABELING:
-                    controller.phase = Phase.COMPLETE
-                if controller.phase is not Phase.COMPLETE:
-                    raise RuntimeError(
-                        f"校准周期尚未结束，不能释放工位：{controller.phase.value}")
-                cycle_id = controller.record.cycle_id
-                controller.reset()
-                self._live_trace(
-                    f"CAL_VALIDATION_RELEASED station={station.value} cycle={cycle_id}")
-        # NG 标签打印后继续等待 OK 样件；OK 标签打印确认后清灯并启动倒计时。
-        if calibration.clear_pending:
-            calibration.clear_after_resume()
+        # NG continues to the OK validation sample.  For the terminal OK
+        # sample, keep the controller record and calibration lock until the
+        # printed validation label is scanned and the PLC pulse succeeds.
         self._set_calibration_countdown(station, calibration.remaining_seconds)
         self._card_for_station(station).refresh()
         return self._calibration_status_text(station, calibration)

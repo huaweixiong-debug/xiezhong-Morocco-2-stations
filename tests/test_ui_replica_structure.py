@@ -362,7 +362,7 @@ def test_normal_single_ok_auto_prints_label_after_test():
     window.close(); app.processEvents()
 
 
-def test_calibration_labels_do_not_wait_for_scan_and_ok_releases_station():
+def test_calibration_labels_require_scan_before_plc_and_release():
     app, window = _window()
     card = window.cards[1]
     calibration = window.calibration[StationId.B]
@@ -395,10 +395,10 @@ def test_calibration_labels_do_not_wait_for_scan_and_ok_releases_station():
     window.calibration_sample("NG", StationId.B)
     assert calibration.phase is CalibrationPhase.WAIT_OK
     assert card.controller.phase is Phase.COMPLETE
-    assert card._label_ack_pending is False
+    assert card._label_ack_pending is True
     byte, bit = __import__("app.plc", fromlist=["POINTS"]).POINTS["scan_ok"][StationId.B]
-    assert card.scan("CAL-QR-B-NG") is not True
-    assert not card.plc.read_bit(byte, bit)
+    assert card.scan("CAL-QR-B-NG") is True
+    assert card.plc.read_bit(byte, bit)
 
     assert window._begin_ok_validation_cycle(card)
     assert card.controller.phase is Phase.READY
@@ -407,7 +407,10 @@ def test_calibration_labels_do_not_wait_for_scan_and_ok_releases_station():
 
     assert print_results == ["NG", "OK"]
     assert len(scanner_reenable) == 2  # retain the existing post-print LON behavior
-    assert card._label_ack_pending is False
+    assert card._label_ack_pending is True
+    assert calibration.due is True
+    assert calibration.validation_started is True
+    assert card.scan("CAL-QR-B-OK") is True
     assert card.controller.phase is Phase.IDLE
     assert card.controller.record is None
     assert calibration.due is False
