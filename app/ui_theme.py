@@ -259,7 +259,7 @@ def stylesheet() -> str:
     QGroupBox#queryFilters_A:hover, QGroupBox#queryFilters_B:hover {{ border-color: {p.border_strong}; }}
     QGroupBox {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; margin-top: 10px; padding-top: 14px; font-size: {m.operation_text}px; font-weight: 600; }}
     QGroupBox#bottomIndicators_A, QGroupBox#bottomIndicators_B {{ margin-top: 0px; padding-top: 0px; }}
-    QFrame[calibrationTile="true"] {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {m.card_radius}px; }}
+    QFrame[calibrationTile="true"] {{ background: #ffffff; border: 1px solid {p.border}; border-radius: {m.card_radius}px; }}
     QFrame[calibrationTile="true"][state="ng"] {{ background: {p.ng}; border-color: {p.ng}; }}
     QFrame[calibrationTile="true"][state="ok"] {{ background: {p.ok}; border-color: {p.ok}; }}
     QFrame[calibrationTile="true"][state="warn"] {{ background: {p.warn}; border-color: {p.warn}; }}
@@ -283,7 +283,8 @@ def stylesheet() -> str:
     QLabel#statusWarn, QLabel[state="warn"] {{ color: {p.warn}; }}
     QLabel#statusNg, QLabel[state="ng"] {{ color: {p.ng}; }}
     QLabel#statusInfo, QLabel[state="info"] {{ color: {p.info}; }}
-    QLabel[plcLed="true"] {{ background: #cbd5e1; color: #475569; border: 2px solid #94a3b8; border-radius: 14px; font-weight: 700; }}
+    QLabel[plcLed="true"] {{ background: #ffffff; color: #475569; border: 2px solid #cbd5e1; border-radius: 14px; font-weight: 700; }}
+    QLabel[plcLed="true"][state="info"] {{ background: #ffffff; color: #475569; border-color: #cbd5e1; }}
     QLabel[plcLed="true"][state="ok"] {{ background: {p.ok}; color: white; border-color: {p.ok}; }}
     QLabel[plcLed="true"][state="ng"] {{ background: {p.ng}; color: white; border-color: {p.ng}; }}
     QLabel[plcLed="true"][state="warn"] {{ background: {p.warn}; color: white; border-color: {p.warn}; }}

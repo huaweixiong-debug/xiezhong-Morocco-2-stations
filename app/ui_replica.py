@@ -948,6 +948,39 @@ class StationPanel(QFrame):
         self.stepcode_value.style().unpolish(self.stepcode_value)
         self.stepcode_value.style().polish(self.stepcode_value)
 
+    @staticmethod
+    def _validation_indicator_state(signal: str, calibration: Calibration | None) -> str:
+        """Map validation lifecycle to the tile color without using PLC bits.
+
+        PLC values remain visible as the numeric ``1``/``0`` readback.  The
+        tile color instead describes what the operator must do next: white
+        while idle, red while a required sample is pending (including an
+        unexpected result), and green after the expected validation completes.
+        """
+        if calibration is None:
+            return "info"
+
+        complete = bool(
+            calibration.clear_pending
+            or (calibration.phase is CalibrationPhase.COMPLETE and calibration.ok_count > 0)
+        )
+        if complete:
+            return "ok"
+
+        if signal == "calibration_due":
+            return "ng" if calibration.due else "info"
+        if signal == "start_validation":
+            return "ng" if (calibration.due or calibration.validation_started) else "info"
+        if signal == "ng_sample":
+            if calibration.ng_count > 0:
+                return "ok"
+            return "ng" if calibration.validation_started and calibration.phase is CalibrationPhase.WAIT_NG else "info"
+        if signal == "ok_sample":
+            if calibration.ok_count > 0:
+                return "ok"
+            return "ng" if calibration.validation_started and calibration.phase is CalibrationPhase.WAIT_OK else "info"
+        return "info"
+
     def refresh(self):
         c = self.controller; rows = self._records(); self.total_today.setValue(len(rows)); self.ok_today.setValue(sum(1 for r in rows if r.second and r.second.result is Result.OK))
         for row in range(30):
@@ -996,14 +1029,7 @@ class StationPanel(QFrame):
                 byte, bit = POINTS["calibration" if signal == "calibration_due" else signal][self.station]
                 self.indicators[signal].setToolTip(f"PLC M{byte}.{bit} = {int(bool(value))}")
                 self.indicator_labels[signal].setToolTip(f"PLC M{byte}.{bit} = {int(bool(value))}")
-            if signal == "calibration_due":
-                indicator_state = "ng" if value else "info"
-            elif signal in ("ng_sample", "ok_sample"):
-                indicator_state = "ok" if value else "info"
-            elif signal == "start_validation" and calibration is not None and calibration.clear_pending:
-                indicator_state = "ok"
-            else:
-                indicator_state = "ok" if value else "info"
+            indicator_state = self._validation_indicator_state(signal, calibration)
             tile = self.indicator_tiles.get(signal)
             if tile is not None:
                 tile.setProperty("state", indicator_state)

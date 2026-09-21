@@ -9,7 +9,7 @@ from PySide6.QtTest import QTest
 
 from app.models import Phase, StationId
 from app.models import Measurement, Result, TraceRecord
-from app.calibration import CalibrationPhase
+from app.calibration import Calibration, CalibrationPhase
 from app.ui import MainWindow
 
 
@@ -17,6 +17,37 @@ def _window():
     app = QApplication.instance() or QApplication([])
     window = MainWindow(); window.show(); app.processEvents()
     return app, window
+
+
+def test_validation_indicator_colors_follow_lifecycle_not_plc_level():
+    calibration = Calibration()
+    # The mapping is a StationPanel policy, so exercise it without creating a
+    # live station or touching PLC state.
+    from app.ui_replica import StationPanel
+
+    assert StationPanel._validation_indicator_state("ng_sample", calibration) == "info"
+    assert StationPanel._validation_indicator_state("ok_sample", calibration) == "info"
+
+    calibration.mark_due()
+    assert StationPanel._validation_indicator_state("calibration_due", calibration) == "ng"
+    assert StationPanel._validation_indicator_state("start_validation", calibration) == "ng"
+    assert StationPanel._validation_indicator_state("ng_sample", calibration) == "info"
+
+    calibration.begin_validation("dual")
+    assert StationPanel._validation_indicator_state("ng_sample", calibration) == "ng"
+    assert StationPanel._validation_indicator_state("ok_sample", calibration) == "info"
+
+    calibration.sample("NG")
+    assert StationPanel._validation_indicator_state("ng_sample", calibration) == "ok"
+    assert StationPanel._validation_indicator_state("ok_sample", calibration) == "ng"
+
+    calibration.sample("OK")
+    for signal in ("calibration_due", "start_validation", "ng_sample", "ok_sample"):
+        assert StationPanel._validation_indicator_state(signal, calibration) == "ok"
+
+    calibration.clear_after_resume()
+    for signal in ("calibration_due", "start_validation", "ng_sample", "ok_sample"):
+        assert StationPanel._validation_indicator_state(signal, calibration) == "info"
 
 
 class _ScannerCommandSpy:
