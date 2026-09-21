@@ -107,9 +107,13 @@ def _operator_scan(window, station, code):
 
 def _complete_startup_calibration(window, station=StationId.A):
     """Follow the production startup gate before exercising scanner routing."""
+    card = window.cards[0 if station is StationId.A else 1]
     window.start_calibration(station)
     window.calibration_sample("NG", station)
+    window.route_shared_scanner_code(card._pending_label_code)
+    assert window._begin_ok_validation_cycle(card)
     window.calibration_sample("OK", station)
+    window.route_shared_scanner_code(card._pending_label_code)
 
 
 def _simulate_device_progression_to_labeling(card, code):

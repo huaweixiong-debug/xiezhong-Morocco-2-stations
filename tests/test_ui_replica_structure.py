@@ -446,17 +446,22 @@ def test_calibration_labels_do_not_wait_for_scan_and_release():
     window.calibration_sample("NG", StationId.B)
     assert calibration.phase is CalibrationPhase.WAIT_OK
     assert card.controller.phase is Phase.COMPLETE
-    assert card._label_ack_pending is False
+    assert card._label_ack_pending is True
     byte, bit = __import__("app.plc", fromlist=["POINTS"]).POINTS["scan_ok"][StationId.B]
+    assert card.plc.read_bit(byte, bit) is False
+    window.route_shared_scanner_code(card.controller.record.code_2d)
+    assert card._label_ack_pending is False
     assert card.plc.read_bit(byte, bit)
 
     assert window._begin_ok_validation_cycle(card)
     assert card.controller.phase is Phase.READY
     card.controller.phase = Phase.LABELING  # single-test OK result is ready to print
     window.calibration_sample("OK", StationId.B)
+    assert card._label_ack_pending is True
+    window.route_shared_scanner_code(card.controller.record.code_2d)
 
     assert print_results == ["NG", "OK"]
-    assert len(scanner_reenable) == 0  # validation labels do not start scanner acquisition
+    assert len(scanner_reenable) == 2
     assert card._label_ack_pending is False
     assert calibration.due is False
     assert calibration.validation_started is False

@@ -31,9 +31,12 @@ def test_ui_starts_due_then_requires_start_validation_and_ng_ok_before_scan():
         assert "cal-NG-A" in window.printer.calibration_intents
         assert calibration.indicators == (True, True, False)
         assert "OK" in card.calibration_notice.text()
+        window.route_shared_scanner_code(card._pending_label_code)
+        assert window._begin_ok_validation_cycle(card)
         window.calibration_sample("OK", StationId.A)
         assert "cal-OK-A" in window.printer.calibration_intents
-        # 现场规则：验证完成后立即清灯并启动倒计时，不再等待扫码。
+        window.route_shared_scanner_code(card._pending_label_code)
+        # 验证标签扫码确认后清灯并启动倒计时。
         assert not calibration.locked and not calibration.clear_pending
         assert not calibration.due
         assert calibration.indicators == (False, False, False)
@@ -62,7 +65,10 @@ def test_calibration_period_is_applied_as_independent_seconds_and_expires(tmp_pa
         card = window.cards[1]
         window.start_calibration(station)
         window.calibration_sample("NG", station)
+        window.route_shared_scanner_code(card._pending_label_code)
+        assert window._begin_ok_validation_cycle(card)
         window.calibration_sample("OK", station)
+        window.route_shared_scanner_code(card._pending_label_code)
         assert card.scan("NORMAL-B-AFTER-CALIBRATION")
         assert calibration.remaining_seconds == 2 * 60 * 60
         assert window.calibration_countdown_b.value() == 2 * 60 * 60

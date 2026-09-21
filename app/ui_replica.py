@@ -159,6 +159,8 @@ class StationPanel(QFrame):
         self.test_finished.connect(self._finish_test)
         self.payload = None
         self._label_ack_pending = False
+        self._pending_calibration_result = None
+        self._pending_label_code = ""
         self._scan_pulse_token = 0
         self._test_mode_signal_value = None
         self._error_key = None
@@ -624,7 +626,8 @@ class StationPanel(QFrame):
             if self._label_ack_pending:
                 record = self.controller.record
                 normalized_code = code.strip()
-                if record is None or not scanner_code_matches(normalized_code, record.code_2d):
+                expected_code = record.code_2d if record is not None else self._pending_label_code
+                if not expected_code or not scanner_code_matches(normalized_code, expected_code):
                     # A shared scanner can see unrelated barcodes while the
                     # operator is finding the freshly printed label.  This is
                     # a non-terminal condition: keep the acknowledgement
@@ -637,6 +640,13 @@ class StationPanel(QFrame):
                     return False
                 self._send_scan_ok(normalized_code)
                 self._label_ack_pending = False
+                pending_calibration_result = self._pending_calibration_result
+                self._pending_calibration_result = None
+                self._pending_label_code = ""
+                if pending_calibration_result is not None:
+                    complete_calibration = getattr(self.window(), "_complete_calibration_after_scan", None)
+                    if complete_calibration is not None:
+                        complete_calibration(self, pending_calibration_result)
                 if self.controller.phase is Phase.LABELING:
                     self.controller.phase = Phase.COMPLETE
                 if self.controller.phase is Phase.COMPLETE:
@@ -841,6 +851,7 @@ class StationPanel(QFrame):
             printed = self.controller.label()
             if printed:
                 self._label_ack_pending = True
+                self._pending_label_code = self.controller.record.code_2d if self.controller.record else ""
                 self._clear_scan_ok("await_label_scan")
                 window = self.window()
                 enable_after_print = getattr(window, "_enable_scanner_after_print", None)
@@ -867,6 +878,7 @@ class StationPanel(QFrame):
             if not printed:
                 raise RuntimeError("重打标签未确认")
             self._label_ack_pending = True
+            self._pending_label_code = self.controller.record.code_2d if self.controller.record else ""
             self._clear_scan_ok("await_reprint_scan")
             window = self.window()
             enable_after_print = getattr(window, "_enable_scanner_after_print", None)
@@ -883,6 +895,8 @@ class StationPanel(QFrame):
         # reset itself reports an error, so a stale label cannot acknowledge
         # a later production cycle.
         self._label_ack_pending = False
+        self._pending_calibration_result = None
+        self._pending_label_code = ""
         try:
             window = self.window()
             reset_scanner = getattr(window, "reset_station_scanner", None)
@@ -1593,7 +1607,18 @@ class MainWindow(QMainWindow):
             return False
         payload = card.payload
         if payload is None:
-            return False
+            if self.live_mode:
+                return False
+            # Simulation has no D:\data model payload; still create a
+            # deterministic validation record so the printed-label scan path
+            # can be exercised end-to-end.
+            selection = StationSelection(
+                card.station, card.part_no.currentText().strip() or "SIM-PART",
+                card.staff.currentText().strip() or "Operator", calibration.test_mode,
+                "C999", f"CAL-OK-{card.station.value}",
+                card.part_no.currentText().strip() or "SIM-PART", "1", "Cal_OK.btw")
+            card.controller.scan_selection(selection)
+            return True
         # The NG validation label may have pulsed the station scan bit.  Drop
         # that edge before the independent OK validation cycle starts so the
         # PLC cannot mistake a leftover high level for the OK result.
@@ -1961,7 +1986,7 @@ class MainWindow(QMainWindow):
             }[self._language])
 
     def _has_pending_label_scan(self):
-        return any(card._label_ack_pending and card.controller.record is not None
+        return any(card._label_ack_pending and (card.controller.record is not None or card._pending_label_code)
                    for card in getattr(self, "cards", ()))
 
     def _update_scanner_toggle_text(self):
@@ -2965,11 +2990,16 @@ class MainWindow(QMainWindow):
         # fault.  If both stations are waiting, only an exact label match is
         # actionable; all other frames remain harmlessly ignored.
         pending_cards = [card for card in self.cards
-                         if card._label_ack_pending and card.controller.record is not None]
+                         if card._label_ack_pending and
+                         (card.controller.record is not None or card._pending_label_code)]
         if pending_cards:
             normalized_code = str(code).strip()
             exact_cards = [card for card in pending_cards
-                           if scanner_code_matches(normalized_code, card.controller.record.code_2d)]
+                           if scanner_code_matches(
+                               normalized_code,
+                               card.controller.record.code_2d
+                               if card.controller.record is not None
+                               else card._pending_label_code)]
             if len(exact_cards) == 1:
                 card = exact_cards[0]
             elif len(pending_cards) == 1:
@@ -3179,8 +3209,8 @@ class MainWindow(QMainWindow):
         # acknowledgement path is allowed to raise this bit again.
         card._clear_scan_ok("calibration_start")
         self._sync_validation_outputs("validation_started", station)
-        # 校准标签不需要扫码确认。内部冻结型号/二维码供测试与追溯使用，
-        # 但保持页面二维码框为空；只有正常生产标签需要打印后扫码确认。
+        # 预先冻结验证件型号/二维码供测试与追溯使用；验证结果通过后，
+        # 仍必须完成“打印验证标签→扫码确认”握手，才允许向 PLC 放行。
         if controller.record is None:
             payload = card.payload
             if payload is not None:
@@ -3235,25 +3265,21 @@ class MainWindow(QMainWindow):
             self._live_trace(f"CAL_PRINT_REJECTED station={station.value} result={result} detail={getattr(receipt, 'detail', '')}")
             raise RuntimeError(f"校准{result}标签打印未确认")
         self._live_trace(f"CAL_PRINT_ACCEPTED station={station.value} result={result} job={getattr(receipt, 'job_id', '')}")
-        # Validation labels are traceability output only.  Unlike a normal
-        # production label, they must not block the NG -> OK -> production
-        # state machine on a scanner acknowledgement: an expected validation
-        # result and the operator reset are equivalent completion events.
         card = self._card_for_station(station)
-        card._label_ack_pending = False
+        card._label_ack_pending = True
+        card._pending_calibration_result = result
+        if card.controller.record is not None:
+            card._pending_label_code = card.controller.record.code_2d
+        else:
+            qr_path = self.data_dir / f"二维码{station.value}.txt"
+            card._pending_label_code = qr_path.read_text(encoding="utf-8").strip() if qr_path.is_file() else ""
+            if not card._pending_label_code and not self.live_mode:
+                card._pending_label_code = f"CAL-{result}-{station.value}"
+        self._enable_scanner_after_print(station, getattr(receipt, "job_id", ""))
+        # Record the expected validation result before printing, but defer the
+        # PLC pulse and terminal release until the printed label is scanned.
         phase = calibration.sample(result)
         self._sync_validation_outputs(f"sample_{result.lower()}_accepted", station)
-        # In validation mode the expected result is the same completion event
-        # as a matching scan/reset.  Pulse the station's M0.0/M0.1 handshake
-        # immediately after print confirmation; normal production labels
-        # still require the physical scan path in ``scan``.
-        record = card.controller.record
-        if record is not None:
-            card._send_scan_ok(record.code_2d)
-            byte, bit = POINTS["scan_ok"][station]
-            self._live_trace(
-                f"CAL_PLC_SIGNAL station={station.value} point=M{byte}.{bit} "
-                f"result={result} reason=validation_result")
         # 现场规则：样件验证通过才递增校准流水号（C001→C002→...连续）。
         try:
             record = self._card_for_station(station).controller.record
@@ -3274,22 +3300,39 @@ class MainWindow(QMainWindow):
             controller.phase = Phase.COMPLETE
         if result == "NG":
             self._live_trace(
-                f"CAL_VALIDATION_RELEASED_AFTER_RESULT station={station.value} "
+                f"CAL_VALIDATION_WAITING_LABEL_SCAN station={station.value} "
                 f"stage=NG")
         elif phase is CalibrationPhase.COMPLETE:
-            if controller.record is not None:
-                if controller.phase is not Phase.COMPLETE:
-                    raise RuntimeError(
-                        f"校准周期尚未结束，不能释放工位：{controller.phase.value}")
-                cycle_id = controller.record.cycle_id
-                controller.reset()
-                self._live_trace(
-                    f"CAL_VALIDATION_RELEASED_AFTER_RESULT station={station.value} "
-                    f"stage=OK cycle={cycle_id}")
-            calibration.clear_after_resume()
+            self._live_trace(
+                f"CAL_VALIDATION_WAITING_LABEL_SCAN station={station.value} "
+                f"stage=OK")
         self._set_calibration_countdown(station, calibration.remaining_seconds)
         card.refresh()
         return self._calibration_status_text(station, calibration)
+
+    def _complete_calibration_after_scan(self, card, result: str) -> None:
+        """Finish a validated sample only after its printed label is scanned."""
+        station = card.station
+        calibration = self.calibration[station]
+        byte, bit = POINTS["scan_ok"][station]
+        self._live_trace(
+            f"CAL_PLC_SIGNAL station={station.value} point=M{byte}.{bit} "
+            f"result={result} reason=validation_label_scan")
+        if result == "OK" and calibration.phase is CalibrationPhase.COMPLETE:
+            cycle_id = card.controller.record.cycle_id if card.controller.record is not None else ""
+            if card.controller.record is not None:
+                if card.controller.phase not in (Phase.COMPLETE, Phase.IDLE):
+                    card.controller.phase = Phase.COMPLETE
+                card.controller.reset()
+            calibration.clear_after_resume()
+            self._set_calibration_countdown(station, calibration.remaining_seconds)
+            self._live_trace(
+                f"CAL_VALIDATION_RELEASED_AFTER_SCAN station={station.value} "
+                f"stage=OK cycle={cycle_id}")
+        elif result == "NG":
+            self._live_trace(
+                f"CAL_VALIDATION_RELEASED_AFTER_SCAN station={station.value} "
+                f"stage=NG")
 
     def on_calibration_sample(self, result, station=StationId.A):
         try:

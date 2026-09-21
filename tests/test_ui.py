@@ -35,8 +35,11 @@ def test_visible_scanner_calibration_and_settings_commit_flows(tmp_path):
     QTest.mouseClick(window.findChild(QPushButton, "start_A"), Qt.MouseButton.LeftButton)
     window.on_calibration_sample("NG", StationId.A)
     assert "等待OK" in window.calibration_status.text()
+    window.route_shared_scanner_code(window.cards[0]._pending_label_code)
+    assert window._begin_ok_validation_cycle(window.cards[0])
     window.on_calibration_sample("OK", StationId.A)
     assert "校准完成" in window.calibration_status.text()
+    window.route_shared_scanner_code(window.cards[0]._pending_label_code)
     # Visible scanner control routes through framer and guard.
     window.scanner_input.setText("QR-UI-001")
     scanner = next(button for button in window.tabs.widget(0).findChildren(QPushButton) if "扫码到 A" in button.text())
