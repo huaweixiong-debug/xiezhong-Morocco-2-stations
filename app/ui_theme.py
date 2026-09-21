@@ -283,6 +283,10 @@ def stylesheet() -> str:
     QLabel#statusWarn, QLabel[state="warn"] {{ color: {p.warn}; }}
     QLabel#statusNg, QLabel[state="ng"] {{ color: {p.ng}; }}
     QLabel#statusInfo, QLabel[state="info"] {{ color: {p.info}; }}
+    QLabel[plcLed="true"] {{ background: #cbd5e1; color: #475569; border: 2px solid #94a3b8; border-radius: 14px; font-weight: 700; }}
+    QLabel[plcLed="true"][state="ok"] {{ background: {p.ok}; color: white; border-color: {p.ok}; }}
+    QLabel[plcLed="true"][state="ng"] {{ background: {p.ng}; color: white; border-color: {p.ng}; }}
+    QLabel[plcLed="true"][state="warn"] {{ background: {p.warn}; color: white; border-color: {p.warn}; }}
     QLineEdit, QComboBox, QSpinBox, QTimeEdit, QDateTimeEdit {{ min-height: {m.input_height}px; border: 1px solid {p.border_strong}; border-radius: {m.control_radius + 2}px; background: {p.surface}; padding: 0 10px; selection-background-color: {p.accent}; }}
     QSpinBox[compact="true"] {{ min-height: 24px; max-height: 30px; padding: 0 6px; }}
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTimeEdit:focus, QDateTimeEdit:focus {{ border: 2px solid {p.accent}; padding: 0 9px; }}

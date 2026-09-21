@@ -268,8 +268,10 @@ class StationPanel(QFrame):
             # Keep the semantic indicator object for diagnostics/tests, but
             # render the whole tile as the lamp so operators do not have to
             # interpret a tiny colored dot.
-            led = QLabel(""); led.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            led.setObjectName(f"{signal}_{station.value}"); led.setProperty("state", "info"); led_font = led.font(); led_font.setPointSize(38); led.setFont(led_font); led.setMinimumSize(46, 46); led.setFixedHeight(46)
+            led = QLabel("0"); led.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            led.setObjectName(f"{signal}_{station.value}"); led.setProperty("state", "info"); led.setProperty("plcLed", True)
+            led_font = led.font(); led_font.setPointSize(11); led_font.setBold(True); led.setFont(led_font)
+            led.setFixedSize(28, 28)
             self.indicators[signal] = led; tile_layout.addWidget(led)
             label_index = {"calibration_due": 0, "ng_sample": 2, "ok_sample": 3}[signal]
             byte, bit = POINTS[signal][station]
@@ -989,7 +991,7 @@ class StationPanel(QFrame):
         self.calibration_notice.style().polish(self.calibration_notice)
         for signal, _ in INDICATOR_NAMES:
             value = values[signal]
-            self.indicators[signal].setText("●")
+            self.indicators[signal].setText("1" if bool(value) else "0")
             if signal in VALIDATION_POINT_SIGNALS:
                 byte, bit = POINTS["calibration" if signal == "calibration_due" else signal][self.station]
                 self.indicators[signal].setToolTip(f"PLC M{byte}.{bit} = {int(bool(value))}")
