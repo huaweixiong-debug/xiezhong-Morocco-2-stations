@@ -71,5 +71,6 @@ def build_services(settings: Settings, station: StationId = StationId.A, *, pref
     ateq.connect()
     printer = BarTenderCmdPrinter(
         Path(r"C:\Program Files\Seagull\BarTender Suite\bartend.exe"),
-        settings.data_dir, settings.data_dir / "label_data.txt")
+        settings.data_dir, settings.data_dir / "label_data.txt",
+        resident=True)
     return CapabilityPolicy(settings.mode, writes_allowed=True, physical_io_allowed=True), plc, ateq, repository, printer

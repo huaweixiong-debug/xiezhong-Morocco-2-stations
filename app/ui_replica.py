@@ -1176,7 +1176,9 @@ class MainWindow(QMainWindow):
                                                 database=self.settings.database)
             self.repository.connect_and_verify()
             self.plc = self.real_plc
-            self.printer = BarTenderCmdPrinter(Path(r"C:\Program Files\Seagull\BarTender Suite\bartend.exe"), self.data_dir, self.data_dir / "label_data.txt")
+            self.printer = BarTenderCmdPrinter(
+                Path(r"C:\Program Files\Seagull\BarTender Suite\bartend.exe"),
+                self.data_dir, self.data_dir / "label_data.txt", resident=True)
         else:
             self.real_plc = None
             self.plc = FakePlc()
@@ -1951,6 +1953,11 @@ class MainWindow(QMainWindow):
             scanner.close()
         for ateq in getattr(self, "live_ateq", {}).values():
             ateq.close()
+        printer = getattr(self, "printer", None)
+        if printer is not None:
+            close_printer = getattr(printer, "close", None)
+            if callable(close_printer):
+                close_printer()
         if self.real_plc is not None:
             self.real_plc.safe_stop("live hardware UI closed")
         super().closeEvent(event)

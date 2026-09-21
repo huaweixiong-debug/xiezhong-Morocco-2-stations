@@ -90,6 +90,45 @@ def test_printer_uses_selected_template_name_and_station_field_files(tmp_path, m
     assert not (data_dir / "二维码A.txt").exists()
 
 
+def test_resident_printer_reuses_one_backend_for_multiple_labels(tmp_path, monkeypatch):
+    data_dir = tmp_path / "Data"
+    data_dir.mkdir()
+    executable = tmp_path / "bartend.exe"
+    executable.touch()
+    template = data_dir / "labelB.btw"
+    template.touch()
+    backend_instances = []
+
+    class FakeResidentBackend:
+        def __init__(self, timeout_s):
+            self.printed = []
+            self.closed = False
+            backend_instances.append(self)
+
+        def print(self, path):
+            self.printed.append(Path(path).resolve())
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("app.barprint._ResidentBarTenderBackend", FakeResidentBackend)
+    monkeypatch.setattr("app.barprint.subprocess.run",
+                        lambda *args, **kwargs: pytest.fail("resident backend should bypass CLI"))
+    printer = BarTenderCmdPrinter(executable, data_dir, data_dir / "label_data.txt",
+                                  resident=True)
+    for cycle in ("B-cycle-1", "B-cycle-2"):
+        receipt = printer.print_label(TraceRecord(
+            station=StationId.B, serial_no=cycle[-1], code_2d=f"QR-{cycle}",
+            part_no="PART-B", person="Operator", cycle_id=cycle,
+            template_path=str(template)))
+        assert receipt.accepted
+
+    assert len(backend_instances) == 1
+    assert backend_instances[0].printed == [template.resolve(), template.resolve()]
+    printer.close()
+    assert backend_instances[0].closed
+
+
 @pytest.mark.parametrize("template_name", ["outside.btw", "Cal_NG_B.btw", "wrong-extension.txt"])
 def test_printer_rejects_outside_calibration_or_non_btw_templates(
         tmp_path, monkeypatch, template_name):

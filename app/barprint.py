@@ -20,9 +20,10 @@ This module keeps that contract:
 """
 from __future__ import annotations
 import subprocess
+from queue import Empty, Queue
 from datetime import datetime
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 
 from .models import StationId, TraceRecord
 from .printer import PrintReceipt
@@ -167,17 +168,185 @@ def _validate_production_template(template_dir: Path, candidate: str | Path) -> 
     return path
 
 
+class _ResidentBackendUnavailable(RuntimeError):
+    """The optional BarTender Automation backend cannot be started."""
+
+
+class _ResidentPrintError(RuntimeError):
+    """A resident worker rejected a specific print job."""
+
+
+class _ResidentBarTenderBackend:
+    """Single-threaded COM worker that keeps BarTender resident in memory."""
+
+    def __init__(self, timeout_s: float) -> None:
+        self.timeout_s = float(timeout_s)
+        self._jobs: Queue = Queue()
+        self._ready = Event()
+        self._startup_error: BaseException | None = None
+        self._closed = False
+        self._thread = Thread(target=self._run, name="bartender-resident", daemon=True)
+        self._thread.start()
+        if not self._ready.wait(timeout=self.timeout_s):
+            self._closed = True
+            raise _ResidentBackendUnavailable("BarTender Automation 启动超时")
+        if self._startup_error is not None:
+            raise _ResidentBackendUnavailable(str(self._startup_error))
+
+    def _run(self) -> None:
+        pythoncom = None
+        app = None
+        formats = {}
+        try:
+            try:
+                import pythoncom
+                import win32com.client
+            except Exception as exc:
+                self._startup_error = RuntimeError(
+                    f"BarTender Automation 不可用：{type(exc).__name__}: {exc}")
+                return
+            pythoncom.CoInitialize()
+            try:
+                app = win32com.client.DispatchEx("BarTender.Application")
+                try:
+                    app.Visible = False
+                except Exception:
+                    # Visibility is cosmetic; some BarTender editions expose
+                    # a read-only Application.Visible property.
+                    pass
+                self._ready.set()
+                while True:
+                    job = self._jobs.get()
+                    if job is None:
+                        break
+                    template, result_queue = job
+                    try:
+                        key = str(Path(template).resolve())
+                        fmt = formats.get(key)
+                        if fmt is None:
+                            fmt = app.Formats.Open(key, False, "")
+                            formats[key] = fmt
+                        # BarTender reads the external TXT data sources at
+                        # print time.  False/False means no UI prompt and
+                        # return after the job is handed to the spooler.
+                        fmt.PrintOut(False, False)
+                        result_queue.put((True, ""))
+                    except Exception as exc:
+                        result_queue.put((False, f"{type(exc).__name__}: {exc}"))
+            finally:
+                for fmt in formats.values():
+                    try:
+                        fmt.Close(1)
+                    except Exception:
+                        pass
+                if app is not None:
+                    try:
+                        app.Quit(1)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            if not self._ready.is_set():
+                self._startup_error = exc
+        finally:
+            if not self._ready.is_set():
+                self._ready.set()
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    def print(self, template: Path) -> None:
+        if self._closed or not self._thread.is_alive():
+            raise _ResidentPrintError("BarTender resident worker 已停止")
+        result_queue: Queue = Queue(maxsize=1)
+        self._jobs.put((Path(template), result_queue))
+        try:
+            accepted, detail = result_queue.get(timeout=self.timeout_s)
+        except Empty as exc:
+            raise _ResidentPrintError(
+                f"BarTender resident 打印超时({self.timeout_s}s)") from exc
+        if not accepted:
+            raise _ResidentPrintError(f"BarTender resident 打印失败：{detail}")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._thread.is_alive():
+            self._jobs.put(None)
+            self._thread.join(timeout=min(self.timeout_s, 10.0))
+
+
 class BarTenderCmdPrinter:
-    """Single-shot BarTender printer driven through bartend.exe."""
+    """BarTender printer with an optional resident Automation worker.
+
+    The command-line path remains the compatibility fallback.  When
+    ``resident=True`` the first print starts one BarTender COM server and
+    subsequent jobs reuse its open format objects, avoiding the 5-6 second
+    ``bartend.exe /X`` startup cost observed on the field PC.
+    """
 
     def __init__(self, executable: Path, template_dir: Path, data_file: Path,
-                 close_after: bool = True, timeout_s: float = 120.0) -> None:
+                 close_after: bool = True, timeout_s: float = 120.0,
+                 resident: bool = False) -> None:
         self.executable, self.template_dir = Path(executable), Path(template_dir)
         self.data_file = Path(data_file)
         self.close_after, self.timeout_s = close_after, timeout_s
+        self.resident = bool(resident)
         self.intents: set[str] = set()
         self.calibration_intents: set[str] = set()
         self._lock = Lock()
+        self._resident_lock = Lock()
+        self._resident_backend = None
+        self._resident_disabled = False
+
+    def _cli_print(self, template: Path) -> tuple[bool, str]:
+        """Print one template through the legacy command-line contract."""
+        try:
+            completed = subprocess.run(
+                bartend_command(self.executable, template, self.close_after),
+                capture_output=True, text=True, timeout=self.timeout_s,
+                encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired as exc:
+            return False, f"BarTender 打印超时({self.timeout_s}s): {exc}"
+        if completed.returncode == 0:
+            return True, ""
+        detail = (completed.stderr or completed.stdout or "").strip()
+        return False, f"BarTender 返回码 {completed.returncode}: {detail}"
+
+    def _print_template(self, template: Path) -> tuple[bool, str]:
+        """Dispatch through the resident worker, falling back only on startup failure.
+
+        A job-level COM error is returned directly instead of being retried by
+        the command-line path, because retrying an ambiguous print could make
+        a duplicate physical label.
+        """
+        if not self.resident or self._resident_disabled:
+            return self._cli_print(template)
+        try:
+            with self._resident_lock:
+                if self._resident_backend is None:
+                    self._resident_backend = _ResidentBarTenderBackend(
+                        timeout_s=self.timeout_s)
+                backend = self._resident_backend
+            backend.print(template)
+            return True, ""
+        except _ResidentBackendUnavailable:
+            with self._resident_lock:
+                self._resident_disabled = True
+                self._resident_backend = None
+            return self._cli_print(template)
+        except _ResidentPrintError as exc:
+            return False, str(exc)
+
+    def close(self) -> None:
+        """Stop the resident COM worker during a clean UI shutdown."""
+        with self._resident_lock:
+            backend = self._resident_backend
+            self._resident_backend = None
+        if backend is not None:
+            backend.close()
 
     def print_label(self, record: TraceRecord) -> PrintReceipt:
         if not self.executable.exists():
@@ -194,17 +363,10 @@ class BarTenderCmdPrinter:
             self.intents.add(record.cycle_id)
             write_field_files(record, self.template_dir, template)
             write_label_data(record, self.data_file)
-            command = bartend_command(self.executable, template, self.close_after)
-            try:
-                completed = subprocess.run(command, capture_output=True, text=True,
-                                           timeout=self.timeout_s, encoding="utf-8",
-                                           errors="replace")
-            except subprocess.TimeoutExpired as exc:
-                return PrintReceipt(False, job_id, f"BarTender 打印超时({self.timeout_s}s): {exc}")
-            if completed.returncode == 0:
+            accepted, detail = self._print_template(template)
+            if accepted:
                 return PrintReceipt(True, job_id, f"{template.name} 已发送打印")
-            detail = (completed.stderr or completed.stdout or "").strip()
-            return PrintReceipt(False, job_id, f"BarTender 返回码 {completed.returncode}: {detail}")
+            return PrintReceipt(False, job_id, detail)
 
     def print_calibration(self, station: StationId, result: str,
                           measurement=None, when=None) -> PrintReceipt:
@@ -239,12 +401,8 @@ class BarTenderCmdPrinter:
             measurement_line = _measurement_line(measurement, when)
             _atomic_write(self.template_dir / f"正压值{station.value}.txt", measurement_line)
             _atomic_write(self.template_dir / f"负压值{station.value}.txt", measurement_line)
-            completed = subprocess.run(
-                bartend_command(self.executable, template, self.close_after),
-                capture_output=True, text=True, timeout=self.timeout_s,
-                encoding="utf-8", errors="replace")
-            if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "").strip()
-                return PrintReceipt(False, job_id, f"BarTender 返回码 {completed.returncode}: {detail}")
+            accepted, detail = self._print_template(template)
+            if not accepted:
+                return PrintReceipt(False, job_id, detail)
             self.calibration_intents.add(job_id)
             return PrintReceipt(True, job_id, f"{template.name} 已发送打印")
