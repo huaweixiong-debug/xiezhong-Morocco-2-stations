@@ -2524,7 +2524,7 @@ class MainWindow(QMainWindow):
                     widget = QLineEdit()
                 widget.setObjectName(f"query_{key}_{s.value}"); self.query_fields[(s,key)] = widget; grid.addWidget(QLabel(f"{label} {s.value}"),row,0); grid.addWidget(widget,row,1)
             status = QLabel(); status.setObjectName(f"query_status_{s.value}"); self.query_status = getattr(self, "query_status", {}); self.query_status[s] = status; grid.addWidget(status,5,0,1,2)
-            search = QPushButton(f"Search {s.value}"); search.setObjectName(f"query_search_{s.value}"); search.setProperty("primary", True); search.clicked.connect(self.refresh_query)
+            search = QPushButton(f"Search {s.value}"); search.setObjectName(f"query_search_{s.value}"); search.setProperty("primary", True); search.clicked.connect(lambda _=False, station=s: self.refresh_query(station))
             download = QPushButton(f"Download {s.value}"); download.setObjectName(f"query_download_{s.value}"); download.clicked.connect(lambda _=False, station=s: self.download_query(station))
             actions = QHBoxLayout(); actions.setSpacing(8); actions.addWidget(search, 1); actions.addWidget(download, 1); grid.addLayout(actions, 4, 0, 1, 2); filters.addWidget(group)
         root.addLayout(filters); tables = QHBoxLayout(); tables.setSpacing(METRICS.station_gap); self.query_tables = {}
@@ -3150,9 +3150,12 @@ class MainWindow(QMainWindow):
         needle = self.query_fields[(station,"code")].text().strip().lower(); result = self.query_fields[(station,"result")].text().strip().lower(); rows = [r for r in self.repository.records.values() if r.station is station]
         rows.sort(key=lambda r: r.created_at, reverse=True)
         return [r for r in rows if start <= r.created_at.astimezone(start.tzinfo) <= finish and (not needle or needle in r.code_2d.lower()) and (not result or result in ((r.second or r.first).result.value.lower() if (r.second or r.first) else ""))]
-    def refresh_query(self):
-        for station, table in self.query_tables.items():
-            rows = self._query_records(station); table.setRowCount(30)
+    def refresh_query(self, station=None):
+        """Refresh one station table; omit station only for a full refresh."""
+        stations = tuple(StationId) if station is None else (station,)
+        for current in stations:
+            table = self.query_tables[current]
+            rows = self._query_records(current); table.setRowCount(30)
             for i in range(30):
                 vals = ["", "", "", "", "", "", "", "", "", ""]
                 if i < len(rows):

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCore import QDateTime, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QTableWidgetItem
 
 from app.config import Settings
 from app.models import Measurement, Result, StationId, TraceRecord
@@ -57,6 +57,26 @@ def test_query_datetime_ranges_are_independent_and_export_filtered(tmp_path):
     assert "开始时间" in window.query_status[StationId.A].text()
     out = tmp_path / "filtered.csv"; window.download_query(StationId.A, str(out))
     assert "RECENT" not in out.read_text(encoding="utf-8-sig")
+    window.close(); app.processEvents()
+
+
+def test_query_buttons_refresh_only_their_station_table():
+    app, window = _window()
+    now = datetime.now(timezone.utc)
+    a_record = TraceRecord(StationId.A, "A-001", "A-CODE", first=Measurement(1, 1, Result.OK, b"a"), cycle_id="a-query", created_at=now)
+    b_record = TraceRecord(StationId.B, "B-001", "B-CODE", first=Measurement(1, 1, Result.NG, b"b"), cycle_id="b-query", created_at=now)
+    window.repository.records.update({a_record.cycle_id: a_record, b_record.cycle_id: b_record})
+    window.query_fields[(StationId.A, "code")].setText("A-CODE")
+    window.query_fields[(StationId.B, "code")].setText("B-CODE")
+    window.query_tables[StationId.B].setItem(0, 2, QTableWidgetItem("B-TABLE-UNCHANGED"))
+
+    window.findChild(QPushButton, "query_search_A").click()
+    assert window.query_tables[StationId.A].item(0, 2).text() == "A-CODE"
+    assert window.query_tables[StationId.B].item(0, 2).text() == "B-TABLE-UNCHANGED"
+
+    window.findChild(QPushButton, "query_search_B").click()
+    assert window.query_tables[StationId.B].item(0, 2).text() == "B-CODE"
+    assert window.query_tables[StationId.A].item(0, 2).text() == "A-CODE"
     window.close(); app.processEvents()
 
 
