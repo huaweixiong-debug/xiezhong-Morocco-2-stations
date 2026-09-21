@@ -1168,6 +1168,7 @@ class MainWindow(QMainWindow):
             self.repository = FakeRepository(self.settings)
             self.printer = FakePrinter()
         self.calibration = {s: Calibration(station=s, initial_due=True) for s in StationId}
+        self._validation_output_state: dict[tuple[StationId, str], bool] = {}
         self._calibration_state_path = Path(
             os.environ.get("LEAKTEST_CAL_STATE", r"D:\ATEQ\calibration_state.json"))
         self._restore_calibration(); self.security = SecurityContext(AuthSession(demo=True, password_file=self.data_dir / "管理员.txt"), LicenseVerifier(simulator=True).verify(b"SIMULATE", b"SIMULATE-SIGNATURE")); self.product_settings = ProductSettingsService(self.security); self.model_settings = ModelSettingsService(self.security, self.data_dir / "日期设置.ini"); self.personnel = PersonnelService(self.security, self.data_dir / "作业员列表.txt"); self.global_settings = GlobalSettingsService(self.security, self.data_dir / "全局设置.ini"); self.scanner_framers = {s: ScannerFramer() for s in StationId}; self.scanner_guards = {s: ScannerGuard() for s in StationId}; self.confirmation_callback = self._confirm_output; self._setup_values = {"customer_no":"", "ateq_no":"SIM"}; self.journal_dir = Path(tempfile.mkdtemp(prefix="LeakTest2Channels-replica-")); self.tabs = CompatibilityTabs(); self._language = language if language in UiTextCatalog.LANGUAGES else "中文"; self._i18n_widgets = []
@@ -1190,6 +1191,7 @@ class MainWindow(QMainWindow):
             # task acknowledged it.
             for card in self.cards:
                 card._clear_scan_ok("ui_startup")
+        self._sync_validation_outputs("ui_startup")
         self._refresh_calibration_countdowns()
         self.calibration_timer = QTimer(self)
         self.calibration_timer.setInterval(1000)
@@ -2690,6 +2692,7 @@ class MainWindow(QMainWindow):
         try:
             for station, calibration in self.calibration.items():
                 if calibration.tick():
+                    self._sync_validation_outputs("countdown_expired", station)
                     self._card_for_station(station).refresh()
                     self.calibration_status.setText(
                         {"中文": f"工位 {station.value} 校准到期，请点击启动验证",
@@ -2703,6 +2706,38 @@ class MainWindow(QMainWindow):
             # 会导致应用直接退出），记录后等下一个 tick。
             self._live_trace(f"CAL_TICK_FAILED {type(exc).__name__}: {exc}")
             self._log_crash("CAL_TICK", exc)
+
+    def _set_validation_output(self, station, signal: str, value: bool, reason: str) -> None:
+        """Write one validation request/status bit only when its state changes."""
+        key = (station, signal)
+        value = bool(value)
+        if self._validation_output_state.get(key) == value:
+            return
+        byte, bit = POINTS[signal][station]
+        self.plc.write_bit(byte, bit, value)
+        self._validation_output_state[key] = value
+        self._live_trace(
+            f"CAL_PLC_OUTPUT station={station.value} point=M{byte}.{bit} "
+            f"value={int(value)} reason={reason}")
+
+    def _sync_validation_outputs(self, reason: str, station=None) -> None:
+        """Project the validation state machine to the six PLC output bits."""
+        stations = (station,) if station is not None else tuple(StationId)
+        for current in stations:
+            calibration = self.calibration[current]
+            if calibration.clear_pending or not calibration.due:
+                due = ng_request = ok_request = False
+            else:
+                due = True
+                ng_request = bool(
+                    calibration.validation_started and
+                    calibration.phase is CalibrationPhase.WAIT_NG)
+                ok_request = bool(
+                    calibration.validation_started and
+                    calibration.phase is CalibrationPhase.WAIT_OK)
+            self._set_validation_output(current, "calibration", due, reason)
+            self._set_validation_output(current, "ng_sample", ng_request, reason)
+            self._set_validation_output(current, "ok_sample", ok_request, reason)
 
     def cancel_calibration(self, station, reason=None) -> bool:
         """Admin-only cancellation for one station; restart its own period."""
@@ -2729,6 +2764,7 @@ class MainWindow(QMainWindow):
                 raise ValueError("取消校准需要填写原因")
             actor = self.security.session.username
             calibration.cancel(actor, reason)
+            self._sync_validation_outputs("calibration_cancelled", station)
             self._persist_calibration()
             self._set_calibration_countdown(station, calibration.remaining_seconds)
             card.refresh()
@@ -3016,6 +3052,7 @@ class MainWindow(QMainWindow):
         # during the new NG/OK validation sequence.  Only the printed-label
         # acknowledgement path is allowed to raise this bit again.
         card._clear_scan_ok("calibration_start")
+        self._sync_validation_outputs("validation_started", station)
         # 校准标签不需要扫码确认。内部冻结型号/二维码供测试与追溯使用，
         # 但保持页面二维码框为空；只有正常生产标签需要打印后扫码确认。
         if controller.record is None:
@@ -3080,6 +3117,7 @@ class MainWindow(QMainWindow):
         card._label_ack_pending = True
         card._clear_scan_ok("await_calibration_label_scan")
         phase = calibration.sample(result)
+        self._sync_validation_outputs(f"sample_{result.lower()}_accepted", station)
         # 现场规则：样件验证通过才递增校准流水号（C001→C002→...连续）。
         try:
             record = self._card_for_station(station).controller.record
