@@ -3147,7 +3147,22 @@ class MainWindow(QMainWindow):
             status.setText(UiTextCatalog.message(self._language, "query_range"))
             return []
         status.setText("")
-        needle = self.query_fields[(station,"code")].text().strip().lower(); result = self.query_fields[(station,"result")].text().strip().lower(); rows = [r for r in self.repository.records.values() if r.station is station]
+        needle = self.query_fields[(station,"code")].text().strip().lower(); result = self.query_fields[(station,"result")].text().strip().lower()
+        # Query the repository by station so LIVE mode reads the persisted
+        # ``info_A``/``info_B`` table instead of relying only on the current
+        # process cache.  FakeRepository supports the same optional filter.
+        try:
+            rows = list(self.repository.query(station=station))
+        except TypeError:
+            # Keep compatibility with legacy repository doubles that still
+            # expose query(text) only.
+            rows = [r for r in self.repository.records.values() if r.station is station]
+        except Exception as exc:
+            status.setText(f"查询失败：{exc}")
+            self._live_trace(
+                f"QUERY_FAILED station={station.value} "
+                f"{type(exc).__name__}: {exc}")
+            return []
         rows.sort(key=lambda r: r.created_at, reverse=True)
         return [r for r in rows if start <= r.created_at.astimezone(start.tzinfo) <= finish and (not needle or needle in r.code_2d.lower()) and (not result or result in ((r.second or r.first).result.value.lower() if (r.second or r.first) else ""))]
     def refresh_query(self, station=None):

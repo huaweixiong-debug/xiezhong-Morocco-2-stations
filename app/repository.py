@@ -45,9 +45,11 @@ class FakeRepository:
     def count_ok(self) -> int:
         return sum(1 for row in self.records.values() if row.second and row.second.result is Result.OK)
 
-    def query(self, text: str = "") -> list[TraceRecord]:
+    def query(self, text: str = "", station: StationId | None = None) -> list[TraceRecord]:
         needle = text.strip().lower()
-        return [row for row in self.records.values() if not needle or needle in row.code_2d.lower() or needle in row.serial_no.lower()]
+        return [row for row in self.records.values()
+                if (station is None or row.station is station)
+                and (not needle or needle in row.code_2d.lower() or needle in row.serial_no.lower())]
 
 
 class PyMySQLRepository:
