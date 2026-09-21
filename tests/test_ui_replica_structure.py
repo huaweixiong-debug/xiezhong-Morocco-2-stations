@@ -50,6 +50,19 @@ def test_validation_indicator_colors_follow_lifecycle_not_plc_level():
         assert StationPanel._validation_indicator_state(signal, calibration) == "info"
 
 
+def test_single_dual_selection_drives_station_mode_bits():
+    app, window = _window()
+    points = __import__("app.plc", fromlist=["POINTS"]).POINTS["test_mode"]
+    for station, card in zip(StationId, window.cards):
+        byte, bit = points[station]
+        assert card.plc.read_bit(byte, bit) is False
+        card.mode_button.setChecked(True)
+        assert card.plc.read_bit(byte, bit) is True
+        card.mode_button.setChecked(False)
+        assert card.plc.read_bit(byte, bit) is False
+    window.close(); app.processEvents()
+
+
 class _ScannerCommandSpy:
     def __init__(self):
         self.commands = []
@@ -95,11 +108,17 @@ def test_replica_tabs_and_main_station_structure():
     window.shared_scanner = scanner_spy
     QTest.mouseClick(toggle, Qt.MouseButton.LeftButton)
     assert window._scan_enabled is False and "开启" in toggle.text()
-    assert scanner_spy.commands == [False]
+    assert scanner_spy.commands == []
     assert tuple(card.controller.phase for card in window.cards) == phases
+    # Manual LON is rejected while no printed label is awaiting confirmation.
+    window.cards[1]._label_ack_pending = True
+    window.cards[1].controller.record = SimpleNamespace(code_2d="PRINTED-B")
     QTest.mouseClick(toggle, Qt.MouseButton.LeftButton)
     assert window._scan_enabled is True and "关闭" in toggle.text()
-    assert scanner_spy.commands == [False, True]
+    assert scanner_spy.commands == [True]
+    window.cards[1]._label_ack_pending = False
+    window._disable_scanner_after_label_ack(StationId.B)
+    assert window._scan_enabled is False and scanner_spy.commands == [True, False]
     assert [window.tabs.tabBar().tabText(i) for i in range(4)] == ["测试/Main/Principale", "设置/Setup/Coup Monté", "查询/Query/Requête", "手动/Manual/Manuelle"]
     for station in ("A", "B"):
         assert window.findChild(QPushButton, f"single_dual_{station}") is not None
@@ -436,7 +455,7 @@ def test_calibration_labels_do_not_wait_for_scan_and_release():
     window.calibration_sample("OK", StationId.B)
 
     assert print_results == ["NG", "OK"]
-    assert len(scanner_reenable) == 2  # retain the existing post-print LON behavior
+    assert len(scanner_reenable) == 0  # validation labels do not start scanner acquisition
     assert card._label_ack_pending is False
     assert calibration.due is False
     assert calibration.validation_started is False

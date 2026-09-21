@@ -21,6 +21,10 @@ POINTS = {
     "start":        {StationId.A: (16, 0), StationId.B: (16, 1)},   # 启动信号
     "manual":       {StationId.A: (2, 0), StationId.B: (2, 1)},     # 切换为手动
     "scan_ok":      {StationId.A: (0, 1), StationId.B: (0, 0)},     # 扫码OK
+    # 现场模式选择：A 双测=1/单测=0 at M0.5; B 双测=1/单测=0 at M0.4.
+    # These addresses are retained as a named contract even though older
+    # diagnostic screens called the same physical outputs ``pressure``.
+    "test_mode":    {StationId.A: (0, 5), StationId.B: (0, 4)},
     "block":        {StationId.A: (4, 2), StationId.B: (3, 2)},     # 手动封堵
     "stamp":        {StationId.A: (4, 6), StationId.B: (3, 6)},     # 手动盖章
     "clamp":        {StationId.A: (4, 4), StationId.B: (3, 4)},     # 手动夹紧

@@ -160,6 +160,7 @@ class StationPanel(QFrame):
         self.payload = None
         self._label_ack_pending = False
         self._scan_pulse_token = 0
+        self._test_mode_signal_value = None
         self._error_key = None
         self.controller = StationController(station, repository, printer, ateq or FakeAteq(), journal,
             safe_stop=plc, license_status=security.license_status, security=security)
@@ -331,6 +332,7 @@ class StationPanel(QFrame):
         quick.setVisible(False); outer.addWidget(quick)
         self._plc_calibration_due = False
         self.installEventFilter(self)
+        self._sync_test_mode_signal("dual" if self.mode_button.isChecked() else "single", "startup")
         self.refresh()
 
     def set_choices(self, products, people):
@@ -362,7 +364,30 @@ class StationPanel(QFrame):
                 trace(f"TEST_MODE_CHANGE_REJECTED station={self.station.value} frozen={frozen_mode}")
             return
         self.mode_button.setText(f"{'Dual Test / 双测' if dual else 'Single Test / 单测'} {self.station.value}")
+        self._sync_test_mode_signal("dual" if dual else "single", "mode_changed")
         self._product_changed()
+
+    def _sync_test_mode_signal(self, test_mode: str, reason: str = "") -> bool:
+        """Write the station's single/dual selection to its PLC mode bit."""
+        desired = str(test_mode).strip().lower() == "dual"
+        byte, bit = POINTS["test_mode"][self.station]
+        if self._test_mode_signal_value is desired:
+            return True
+        try:
+            self.plc.write_bit(byte, bit, desired)
+            self._test_mode_signal_value = desired
+            trace = getattr(self.window(), "_live_trace", None)
+            if trace is not None:
+                trace(f"TEST_MODE_PLC_SIGNAL station={self.station.value} "
+                     f"point=M{byte}.{bit} value={int(desired)} reason={reason}")
+            return True
+        except Exception as exc:
+            trace = getattr(self.window(), "_live_trace", None)
+            if trace is not None:
+                trace(f"TEST_MODE_PLC_SIGNAL_FAILED station={self.station.value} "
+                     f"point=M{byte}.{bit} value={int(desired)} "
+                     f"reason={reason} error={type(exc).__name__}: {exc}")
+            return False
 
     def _product_changed(self, *_args):
         if not self.payload_provider or not self.part_no.currentText().strip():
@@ -616,6 +641,9 @@ class StationPanel(QFrame):
                     self.controller.phase = Phase.COMPLETE
                 if self.controller.phase is Phase.COMPLETE:
                     self.controller.reset()
+                disable_after_ack = getattr(self.window(), "_disable_scanner_after_label_ack", None)
+                if disable_after_ack is not None:
+                    disable_after_ack(self.station)
                 # A calibration OK result is not complete until its printed
                 # label has been scanned and the PLC handshake succeeded.
                 if calibration is not None and calibration.clear_pending:
@@ -636,15 +664,19 @@ class StationPanel(QFrame):
             if self.payload is not None:
                 if not scanner_code_matches(code, self.payload.barcode_text):
                     raise ValueError("扫码值与当前工位二维码不一致")
+                test_mode = "dual" if self.mode_button.isChecked() else "single"
+                self._sync_test_mode_signal(test_mode, "production_scan")
                 selection = StationSelection(
                     self.station, self.payload.product_id, self.staff.currentText().strip() or "Operator",
-                    "dual" if self.mode_button.isChecked() else "single",
+                    test_mode,
                     self.payload.serial_no, self.payload.barcode_text, self.payload.customer_model,
                     str(self.payload.ateq_program), str(self.payload.template_path))
                 self.controller.scan_selection(selection)
             else:
+                test_mode = "dual" if self.mode_button.isChecked() else "single"
+                self._sync_test_mode_signal(test_mode, "production_scan")
                 self.controller.scan(code, part_no, self.staff.currentText(),
-                                     test_mode="dual" if self.mode_button.isChecked() else "single")
+                                     test_mode=test_mode)
             # In LIVE mode the hardware StepCode=4 edge owns serial
             # reservation.  Consuming here as well makes a scanner pre-scan
             # race the hardware edge and can freeze a stale/duplicate payload.
@@ -885,6 +917,9 @@ class StationPanel(QFrame):
         trace = getattr(self.window(), "_live_trace", None)
         if was_label_ack_pending and trace is not None:
             trace(f"{self.station.value} LABEL_SCAN_CANCELLED_BY_RESET")
+        disable_after_reset = getattr(self.window(), "_disable_scanner_after_label_ack", None)
+        if disable_after_reset is not None:
+            disable_after_reset(self.station)
         self.refresh(); self.changed_callback()
 
     def _clear_scan_ok(self, reason: str) -> None:
@@ -1223,6 +1258,15 @@ class MainWindow(QMainWindow):
                                    self.refresh_all, self._payload_for, self.personnel.list_all,
                                    lambda station: self.calibration[station], self.start_calibration,
                                    self.live_ateq.get(s)) for s in StationId]
+        for station, card in zip(StationId, self.cards):
+            calibration = self.calibration[station]
+            if calibration.validation_started:
+                card.mode_button.blockSignals(True)
+                card.mode_button.setChecked(calibration.test_mode == "dual")
+                card.mode_button.blockSignals(False)
+                card.mode_button.setText(
+                    f"{'Dual Test / 双测' if calibration.test_mode == 'dual' else 'Single Test / 单测'} {station.value}")
+                card._sync_test_mode_signal(calibration.test_mode, "restore_validation")
         if self.b_live and not self.live_all:
             self.cards[0].setEnabled(False)
         self._build_main(); self._build_setup(); self._build_query(); self._build_manual(); self.setCentralWidget(self.tabs)
@@ -1774,7 +1818,7 @@ class MainWindow(QMainWindow):
         self.calibration_countdown_A = self.calibration_countdown_a; self.calibration_countdown_B = self.calibration_countdown_b
         footer.addWidget(countdown_box); root.addLayout(footer)
         for widget in (self.cards[0].bottom_indicators, self.cards[1].bottom_indicators): widget.setMaximumHeight(METRICS.footer_max_height)
-        scanner = QHBoxLayout(); scanner.setSpacing(8); self.scanner_input = QLineEdit(); self.scanner_input.setObjectName("scanner_input"); self.scanner_input.setReadOnly(True); self.scanner_input.setPlaceholderText("在线共用扫码枪：A/B 自动识别"); scanner.addWidget(self.scanner_input); self.shared_scanner_indicator = QLabel("●"); self.shared_scanner_indicator.setObjectName("shared_scanner_indicator"); self.shared_scanner_indicator.setProperty("state", "ng"); scanner.addWidget(self.shared_scanner_indicator); self.scanner_status = QLabel("共用扫码枪连接中…"); self.scanner_status.setObjectName("scannerStatus"); scanner.addWidget(self.scanner_status); self.scanner_toggle = QPushButton("关闭扫码"); self.scanner_toggle.setObjectName("scanner_toggle"); self.scanner_toggle.setProperty("compact", True); self.scanner_toggle.clicked.connect(self.toggle_shared_scanner); scanner.addWidget(self.scanner_toggle)
+        scanner = QHBoxLayout(); scanner.setSpacing(8); self.scanner_input = QLineEdit(); self.scanner_input.setObjectName("scanner_input"); self.scanner_input.setReadOnly(True); self.scanner_input.setPlaceholderText("在线共用扫码枪：A/B 自动识别"); scanner.addWidget(self.scanner_input); self.shared_scanner_indicator = QLabel("●"); self.shared_scanner_indicator.setObjectName("shared_scanner_indicator"); self.shared_scanner_indicator.setProperty("state", "ng"); scanner.addWidget(self.shared_scanner_indicator); self.scanner_status = QLabel("共用扫码枪连接中…"); self.scanner_status.setObjectName("scannerStatus"); scanner.addWidget(self.scanner_status); self.scanner_toggle = QPushButton("开启扫码"); self.scanner_toggle.setObjectName("scanner_toggle"); self.scanner_toggle.setProperty("compact", True); self.scanner_toggle.clicked.connect(self.toggle_shared_scanner); scanner.addWidget(self.scanner_toggle)
         for s in StationId:
             b = QPushButton(f"扫码到 {s.value}"); b.setMinimumWidth(0); b.setProperty("primary", True); b.setObjectName(f"scanner_route_{s.value}"); b.clicked.connect(lambda _=False, station=s: self.route_scanner_text(station)); scanner.addWidget(b)
             b.setVisible(False)  # only retained as an administrator diagnostic hook
@@ -1788,7 +1832,7 @@ class MainWindow(QMainWindow):
     def _start_shared_scanner(self):
         """Start the single online scanner and poll its shared A/B queue."""
         self.shared_scanner = None
-        self._scan_enabled = True
+        self._scan_enabled = False
         self.scanner_timer = QTimer(self)
         self.scanner_timer.setInterval(50)
         self.scanner_timer.timeout.connect(self._poll_shared_scanner)
@@ -1799,11 +1843,9 @@ class MainWindow(QMainWindow):
                 # ASCII with the CR terminator (not CRLF).
                 role="client", terminator=b"\r")
             self.shared_scanner.start()
-            # The scanner's acquisition state is controlled by the operator
-            # button.  Queue the initial LON command now; TcpScanner replays
-            # it automatically when its asynchronous TCP connection becomes
-            # ready (and after any reconnect).
-            self.shared_scanner.set_scan_enabled(self._scan_enabled)
+            # Keep the TCP link online for diagnostics, but acquisition stays
+            # disabled until a confirmed printed label is waiting for a scan.
+            self.shared_scanner.set_scan_enabled(False)
             self.scanner_timer.start()
         except Exception as exc:
             self._set_shared_scanner_indicator(False)
@@ -1887,6 +1929,14 @@ class MainWindow(QMainWindow):
 
     def toggle_shared_scanner(self):
         """Send LON/LOFF to the shared scanner without changing test state."""
+        if not self._scan_enabled and not self._has_pending_label_scan():
+            self.scanner_status.setText({
+                "中文": "当前没有待确认标签，打印完成后自动开启扫码",
+                "English": "No label is awaiting confirmation; scanning starts after printing",
+                "Français": "Aucune étiquette en attente ; la lecture démarre après impression",
+            }[self._language])
+            self._update_scanner_toggle_text()
+            return
         self._scan_enabled = not self._scan_enabled
         scanner = self.shared_scanner
         sent = scanner.set_scan_enabled(self._scan_enabled) if scanner is not None else False
@@ -1895,12 +1945,7 @@ class MainWindow(QMainWindow):
             # the toggle is an input gate, not a queued test command.
             while scanner.read_code(timeout=0) is not None:
                 pass
-        labels = {
-            "中文": ("关闭扫码", "开启扫码"),
-            "English": ("Disable scanning", "Enable scanning"),
-            "Français": ("Désactiver lecture", "Activer lecture"),
-        }[self._language]
-        self.scanner_toggle.setText(labels[0] if self._scan_enabled else labels[1])
+        self._update_scanner_toggle_text()
         command = "LON" if self._scan_enabled else "LOFF"
         if sent:
             self.scanner_status.setText({
@@ -1914,6 +1959,38 @@ class MainWindow(QMainWindow):
                 "English": f"Scanner offline; {command} queued",
                 "Français": f"Scanner hors ligne ; {command} en attente",
             }[self._language])
+
+    def _has_pending_label_scan(self):
+        return any(card._label_ack_pending and card.controller.record is not None
+                   for card in getattr(self, "cards", ()))
+
+    def _update_scanner_toggle_text(self):
+        if not hasattr(self, "scanner_toggle"):
+            return
+        self.scanner_toggle.setText({
+            "中文": "关闭扫码" if self._scan_enabled else "开启扫码",
+            "English": "Disable scanning" if self._scan_enabled else "Enable scanning",
+            "Français": "Désactiver lecture" if self._scan_enabled else "Activer lecture",
+        }[self._language])
+
+    def _disable_scanner_after_label_ack(self, station=None):
+        """Turn acquisition off once all printed labels have been confirmed."""
+        if self._has_pending_label_scan():
+            return False
+        self._scan_enabled = False
+        scanner = getattr(self, "shared_scanner", None)
+        sent = False
+        try:
+            if scanner is not None:
+                sent = bool(scanner.set_scan_enabled(False))
+        except Exception as exc:
+            self._live_trace(
+                f"SCANNER_LOFF_AFTER_SCAN_FAILED station={getattr(station, 'value', station)} "
+                f"{type(exc).__name__}: {exc}")
+        self._update_scanner_toggle_text()
+        self._live_trace(
+            f"SCANNER_LOFF_AFTER_SCAN station={getattr(station, 'value', station)} sent={sent}")
+        return sent
 
     def _enable_scanner_after_print(self, station, job_id=""):
         """Enable the shared scanner only after a confirmed print receipt.
@@ -1935,10 +2012,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         if hasattr(self, "scanner_toggle"):
-            self.scanner_toggle.setText({
-                "中文": "关闭扫码", "English": "Disable scanning",
-                "Français": "Désactiver lecture",
-            }[self._language])
+            self._update_scanner_toggle_text()
         if sent:
             status = {
                 "中文": "标签打印完成，已发送 LON",
@@ -3098,6 +3172,7 @@ class MainWindow(QMainWindow):
         if not (initial_state or completed_cycle):
             raise RuntimeError("当前测试尚未完成")
         calibration.begin_validation("dual" if card.mode_button.isChecked() else "single")
+        card._sync_test_mode_signal(calibration.test_mode, "validation_started")
         self._live_trace(f"CAL_MODE_FROZEN station={station.value} mode={calibration.test_mode}")
         # A previous production/validation scan must never satisfy the PLC
         # during the new NG/OK validation sequence.  Only the printed-label
@@ -3160,7 +3235,6 @@ class MainWindow(QMainWindow):
             self._live_trace(f"CAL_PRINT_REJECTED station={station.value} result={result} detail={getattr(receipt, 'detail', '')}")
             raise RuntimeError(f"校准{result}标签打印未确认")
         self._live_trace(f"CAL_PRINT_ACCEPTED station={station.value} result={result} job={getattr(receipt, 'job_id', '')}")
-        self._enable_scanner_after_print(station, getattr(receipt, "job_id", ""))
         # Validation labels are traceability output only.  Unlike a normal
         # production label, they must not block the NG -> OK -> production
         # state machine on a scanner acknowledgement: an expected validation
