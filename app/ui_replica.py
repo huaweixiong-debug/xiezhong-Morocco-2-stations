@@ -772,12 +772,27 @@ class StationPanel(QFrame):
                       f"leakage={measurement.leakage}{measurement.leakage_unit} "
                       f"raw={measurement.raw_frame.hex()}")
             # Dual validation requires both negative-OK and positive-OK.
-            if (calibration.test_mode == "dual" and record.first is measurement
-                    and measurement.result.value == "OK"
-                    and self.controller.phase is Phase.WAIT_2):
-                if trace is not None:
-                    trace(f"CAL_DUAL_OK_NEGATIVE_PASSED station={self.station.value}")
-                return
+            if calibration.test_mode == "dual":
+                if record.first is measurement and self.controller.phase is Phase.WAIT_2:
+                    if measurement.result.value == "OK" and calibration.phase is CalibrationPhase.WAIT_OK:
+                        if trace is not None:
+                            trace(f"CAL_DUAL_OK_NEGATIVE_PASSED station={self.station.value}")
+                        return
+                    if trace is not None:
+                        trace(f"CAL_EXPECTATION_FAILED station={self.station.value} "
+                             f"stage=OK_NEGATIVE result={measurement.result.value}")
+                    return
+                if record.second is measurement:
+                    # The second half of a dual OK validation must be a
+                    # positive-pressure OK.  An NG result is a failed
+                    # validation, not an NG sample: do not print or pulse PLC.
+                    if measurement.result.value != "OK" or calibration.phase is not CalibrationPhase.WAIT_OK:
+                        if trace is not None:
+                            trace(f"CAL_EXPECTATION_FAILED station={self.station.value} "
+                                 f"stage=OK_POSITIVE result={measurement.result.value}")
+                        return
+                    self.window().on_calibration_sample("OK", self.station)
+                    return
             self.window().on_calibration_sample(measurement.result.value, self.station)
 
     def label(self):
