@@ -3128,14 +3128,25 @@ class MainWindow(QMainWindow):
             raise RuntimeError(f"校准{result}标签打印未确认")
         self._live_trace(f"CAL_PRINT_ACCEPTED station={station.value} result={result} job={getattr(receipt, 'job_id', '')}")
         self._enable_scanner_after_print(station, getattr(receipt, "job_id", ""))
-        # Calibration labels use the same station-specific scan handshake as
-        # production labels; PLC is notified only after the printed label is
-        # scanned back successfully.
+        # Validation labels are traceability output only.  Unlike a normal
+        # production label, they must not block the NG -> OK -> production
+        # state machine on a scanner acknowledgement: an expected validation
+        # result and the operator reset are equivalent completion events.
         card = self._card_for_station(station)
-        card._label_ack_pending = True
-        card._clear_scan_ok("await_calibration_label_scan")
+        card._label_ack_pending = False
         phase = calibration.sample(result)
         self._sync_validation_outputs(f"sample_{result.lower()}_accepted", station)
+        # In validation mode the expected result is the same completion event
+        # as a matching scan/reset.  Pulse the station's M0.0/M0.1 handshake
+        # immediately after print confirmation; normal production labels
+        # still require the physical scan path in ``scan``.
+        record = card.controller.record
+        if record is not None:
+            card._send_scan_ok(record.code_2d)
+            byte, bit = POINTS["scan_ok"][station]
+            self._live_trace(
+                f"CAL_PLC_SIGNAL station={station.value} point=M{byte}.{bit} "
+                f"result={result} reason=validation_result")
         # 现场规则：样件验证通过才递增校准流水号（C001→C002→...连续）。
         try:
             record = self._card_for_station(station).controller.record
@@ -3148,11 +3159,29 @@ class MainWindow(QMainWindow):
         except Exception as serial_exc:
             self._live_trace(
                 f"CAL_SERIAL_ADVANCE_FAILED {type(serial_exc).__name__}: {serial_exc}")
-        # NG continues to the OK validation sample.  For the terminal OK
-        # sample, keep the controller record and calibration lock until the
-        # printed validation label is scanned and the PLC pulse succeeds.
+        # Archive the validation cycle immediately after the expected result.
+        # The next StepCode=4 edge will bridge WAIT_OK to the OK cycle after
+        # NG; a terminal OK result releases the station for production.
+        controller = card.controller
+        if controller.record is not None and controller.phase is Phase.LABELING:
+            controller.phase = Phase.COMPLETE
+        if result == "NG":
+            self._live_trace(
+                f"CAL_VALIDATION_RELEASED_AFTER_RESULT station={station.value} "
+                f"stage=NG")
+        elif phase is CalibrationPhase.COMPLETE:
+            if controller.record is not None:
+                if controller.phase is not Phase.COMPLETE:
+                    raise RuntimeError(
+                        f"校准周期尚未结束，不能释放工位：{controller.phase.value}")
+                cycle_id = controller.record.cycle_id
+                controller.reset()
+                self._live_trace(
+                    f"CAL_VALIDATION_RELEASED_AFTER_RESULT station={station.value} "
+                    f"stage=OK cycle={cycle_id}")
+            calibration.clear_after_resume()
         self._set_calibration_countdown(station, calibration.remaining_seconds)
-        self._card_for_station(station).refresh()
+        card.refresh()
         return self._calibration_status_text(station, calibration)
 
     def on_calibration_sample(self, result, station=StationId.A):
