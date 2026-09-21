@@ -245,6 +245,7 @@ def test_normal_printed_label_scan_acknowledges_and_releases_station():
     assert card.controller.record is None
     byte, bit = __import__("app.plc", fromlist=["POINTS"]).POINTS["scan_ok"][StationId.B]
     assert card.plc.read_bit(byte, bit)
+    assert window._scan_enabled is False
     window.close(); app.processEvents()
 
 
