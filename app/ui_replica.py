@@ -77,6 +77,7 @@ INDICATOR_DISPLAY_LABELS = {
     "English": ["Cal. Time", "Start Validation", "NG Sample 1", "OK Sample 2"],
     "Français": ["Temps cal.", "Validation démarrage", "Échant. NG 1", "Échant. OK 2"],
 }
+VALIDATION_POINT_SIGNALS = ("calibration_due", "ng_sample", "ok_sample")
 
 
 class _CountdownSpinBox(QSpinBox):
@@ -270,7 +271,9 @@ class StationPanel(QFrame):
             led = QLabel(""); led.setAlignment(Qt.AlignmentFlag.AlignCenter)
             led.setObjectName(f"{signal}_{station.value}"); led.setProperty("state", "info"); led_font = led.font(); led_font.setPointSize(38); led.setFont(led_font); led.setMinimumSize(46, 46); led.setFixedHeight(46)
             self.indicators[signal] = led; tile_layout.addWidget(led)
-            text_label = QLabel(INDICATOR_DISPLAY_LABELS["base"][len(self.indicator_labels)])
+            label_index = {"calibration_due": 0, "ng_sample": 2, "ok_sample": 3}[signal]
+            byte, bit = POINTS[signal][station]
+            text_label = QLabel(f"M{byte}.{bit}\n{INDICATOR_DISPLAY_LABELS['base'][label_index]}")
             text_label.setAlignment(Qt.AlignmentFlag.AlignCenter); text_label.setWordWrap(True); text_label.setMinimumHeight(40); text_label.setMaximumHeight(40)
             text_label.setMinimumWidth(0); text_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self.indicator_labels[signal] = text_label; self._fit_indicator_label(text_label)
@@ -963,11 +966,17 @@ class StationPanel(QFrame):
                 calibration.mark_due()
             self._plc_calibration_due = plc_due
             due, ng_verified, ok_verified = calibration.indicators
+            plc_values = {}
+            for signal in ("calibration", "ng_sample", "ok_sample"):
+                try:
+                    plc_values[signal] = self._point_read(signal)
+                except Exception:
+                    plc_values[signal] = False
             values = {
-                "calibration_due": due,
+                "calibration_due": plc_values["calibration"],
                 "start_validation": calibration.validation_started,
-                "ng_sample": ng_verified,
-                "ok_sample": ok_verified,
+                "ng_sample": plc_values["ng_sample"],
+                "ok_sample": plc_values["ok_sample"],
             }
         else:
             values = {signal: False for signal, _ in INDICATOR_NAMES}
@@ -981,6 +990,10 @@ class StationPanel(QFrame):
         for signal, _ in INDICATOR_NAMES:
             value = values[signal]
             self.indicators[signal].setText("●")
+            if signal in VALIDATION_POINT_SIGNALS:
+                byte, bit = POINTS["calibration" if signal == "calibration_due" else signal][self.station]
+                self.indicators[signal].setToolTip(f"PLC M{byte}.{bit} = {int(bool(value))}")
+                self.indicator_labels[signal].setToolTip(f"PLC M{byte}.{bit} = {int(bool(value))}")
             if signal == "calibration_due":
                 indicator_state = "ng" if value else "info"
             elif signal in ("ng_sample", "ok_sample"):
@@ -2551,11 +2564,14 @@ class MainWindow(QMainWindow):
                 widget.setText(text)
         for station in StationId:
             card = self.cards[0 if station is StationId.A else 1]
-            for (signal, _), label_text in zip(INDICATOR_NAMES, INDICATOR_DISPLAY_LABELS[value]):
+            label_indices = {"calibration_due": 0, "ng_sample": 2, "ok_sample": 3}
+            for signal, _ in INDICATOR_NAMES:
                 label = card.indicator_labels.get(signal)
                 if label is None:
                     continue
-                label.setText(label_text)
+                if signal in label_indices:
+                    byte, bit = POINTS["calibration" if signal == "calibration_due" else signal][station]
+                    label.setText(f"M{byte}.{bit}\n{INDICATOR_DISPLAY_LABELS[value][label_indices[signal]]}")
                 StationPanel._fit_indicator_label(label)
             card.mode_button.setText({"中文": f"单测 {station.value}", "English": f"Single Test {station.value}", "Français": f"Test simple {station.value}"}[value])
             for signal, _, _ in MANUAL_NAMES:
